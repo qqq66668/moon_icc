@@ -76,9 +76,15 @@ fn read_and_transform(path : String) -> Unit raise {
 ///|
 /// 端到端变换：源 profile → 目标 profile，输出 8 位量化结果。
 ///
-/// 输出格式：每行 `link <输入> <输出 R> <输出 G> <输出 B>`，
-/// 量化到 0..255，便于与 lcms2 之类的参考实现直接比对
-/// （参考实现通常在 8 位域上给结果）。
+/// 输出格式：每行 `link <输入> <输出通道...>`，量化到 0..255，
+/// 便于与 lcms2 之类的参考实现直接比对（参考实现通常在 8 位域上给结果）。
+///
+/// 输出通道数由**目标 profile** 决定：显示器 profile 是 3 个（RGB），
+/// 打印机 profile 是 4 个（CMYK）。因此同一命令既能看 sRGB → 显示器，
+/// 也能看 sRGB → CMYK。
+///
+/// 驱动样本是灰阶（输入三通道相同）。对 CMYK 目标而言这不是"灰度"——
+/// 因为 CMYK 有四通道，灰阶只覆盖其中一个切片，但足以对比实现差异。
 fn read_and_link(source_path : String, dest_path : String) -> Unit raise {
   let src_data = @fs.read_file_to_bytes(source_path)
   let dst_data = @fs.read_file_to_bytes(dest_path)
@@ -86,26 +92,34 @@ fn read_and_link(source_path : String, dest_path : String) -> Unit raise {
     @moon_icc.Profile::parse(src_data),
     @moon_icc.Profile::parse(dst_data),
   )
+  println("src_channels \{transform.source_channels()}")
+  println("dst_channels \{transform.destination_channels()}")
   for i = 0; i <= 255; i = i + 1 {
     let v = i.to_double() / 255.0
-    let (r, g, b) = transform.transform(v, v, v)
-    // 四舍五入到最近的 8 位值
-    let q = fn(x : Double) -> Int32 {
-      let scaled = x * 255.0
-      let rounded = if scaled - scaled.to_int().to_double() >= 0.5 {
-        scaled.to_int() + 1
-      } else {
-        scaled.to_int()
-      }
-      if rounded < 0 {
-        0
-      } else if rounded > 255 {
-        255
-      } else {
-        rounded
-      }
+    let out = transform.transform_values([v, v, v])
+    let buf = StringBuilder()
+    for x in out {
+      buf.write(" \{quantise8(x)}")
     }
-    println("link \{i} \{q(r)} \{q(g)} \{q(b)}")
+    println("link \{i}\{buf.to_string()}")
+  }
+}
+
+///|
+/// 把 0..1 的值四舍五入到 0..255 的整数（参考实现通常在 8 位域上给结果）。
+fn quantise8(x : Double) -> Int32 {
+  let scaled = x * 255.0
+  let rounded = if scaled - scaled.to_int().to_double() >= 0.5 {
+    scaled.to_int() + 1
+  } else {
+    scaled.to_int()
+  }
+  if rounded < 0 {
+    0
+  } else if rounded > 255 {
+    255
+  } else {
+    rounded
   }
 }
 

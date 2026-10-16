@@ -256,14 +256,87 @@ test "矩阵: 行列式非零" {
 }
 
 ///|
-/// LUT 型 profile 参与链接时必须显式失败。
-test "链接: LUT 型 profile 显式失败" {
+/// **跨类型链接**：matrix/TRC 型源 → LUT 型目标（sRGB → CMYK 打印机）。
+///
+/// 这是本功能的核心：两侧各自可以是 matrix/TRC 型或 LUT 型，
+/// 中间统一用 PCS XYZ 衔接，因此四种组合都能工作。
+///
+/// 注意源是 3 通道、目标是 4 通道（CMYK），所以要用 `transform_values`。
+test "链接: sRGB → CMYK 跨类型链接可用" {
   let src = Profile::parse(@fs.read_file_to_bytes("testdata/srgb.icc"))
   let cmyk = Profile::parse(@fs.read_file_to_bytes("testdata/cmyk_printer.icc"))
-  try ColorTransform::new(src, cmyk) catch {
+  let t = ColorTransform::new(src, cmyk)
+  inspect(t.source_channels(), content="3")
+  inspect(t.destination_channels(), content="4")
+  // 白点应映射到"无墨"
+  let white = t.transform_values([1.0, 1.0, 1.0])
+  inspect(white.length(), content="4")
+  for v in white {
+    if v > 0.15 {
+      fail("sRGB 白点应映射到接近无墨的 CMYK，但某通道为 \{v}")
+    }
+  }
+  // 黑点应映射到接近满墨
+  let black = t.transform_values([0.0, 0.0, 0.0])
+  let darkest = @cmp.maximum(
+    @cmp.maximum(black[0], black[1]),
+    @cmp.maximum(black[2], black[3]),
+  )
+  if darkest < 0.5 {
+    fail("sRGB 黑点应映射到较重的墨量，实得 \{darkest}")
+  }
+  // 中间调必须落在合理区间内，且不得出现 NaN
+  for v in [0.25, 0.5, 0.75] {
+    let out = t.transform_values([v, v, v])
+    for c in out {
+      if c < 0.0 || c > 1.0 {
+        fail("中间调 v=\{v} 的输出越界: \{c}")
+      }
+    }
+  }
+}
+
+///|
+/// 反向跨类型：LUT 型源 → matrix/TRC 型目标（CMYK → sRGB）。
+test "链接: CMYK → sRGB 跨类型链接可用" {
+  let src = Profile::parse(@fs.read_file_to_bytes("testdata/cmyk_printer.icc"))
+  let srgb = Profile::parse(@fs.read_file_to_bytes("testdata/srgb.icc"))
+  let t = ColorTransform::new(src, srgb)
+  inspect(t.source_channels(), content="4")
+  inspect(t.destination_channels(), content="3")
+  // 无墨应接近白
+  let white = t.transform_values([0.0, 0.0, 0.0, 0.0])
+  inspect(white.length(), content="3")
+  for v in white {
+    if v < 0.85 {
+      fail("无墨应映射到接近白，但某通道只有 \{v}")
+    }
+  }
+}
+
+///|
+/// 两侧都是 LUT 型时也应工作（同类型组合）。
+test "链接: LUT → LUT 可用" {
+  let a = Profile::parse(@fs.read_file_to_bytes("testdata/cmyk_printer.icc"))
+  let b = Profile::parse(@fs.read_file_to_bytes("testdata/cmyk_printer.icc"))
+  let t = ColorTransform::new(a, b)
+  inspect(t.source_channels(), content="4")
+  inspect(t.destination_channels(), content="4")
+  let out = t.transform_values([0.0, 0.0, 0.0, 0.0])
+  inspect(out.length(), content="4")
+}
+
+///|
+/// 既没有 matrix/TRC 也没有 LUT tag 的 profile 必须显式失败。
+test "链接: 无可用变换路径的 profile 显式失败" {
+  // 构造一个只有头部的合成 profile：没有任何 rXYZ / A2B tag
+  let src = Profile::parse(@fs.read_file_to_bytes("testdata/srgb.icc"))
+  let data = build_profile_with_tags([])
+  let empty = Profile::parse(data)
+  try ColorTransform::new(src, empty) catch {
     BadTagData(..) => ()
     e => fail("期望 BadTagData，实际: \{e}")
   } noraise {
-    _ => fail("LUT 型 profile 应当显式失败")
+    _ => fail("没有变换路径的 profile 应当显式失败")
   }
 }

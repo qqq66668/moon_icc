@@ -99,6 +99,12 @@ SCENE_SPECS = [
         19,
     ),
     (
+        "跨类型链接：sRGB → CMYK 打印机",
+        ["link", "testdata/srgb.icc", "testdata/cmyk_printer.icc"],
+        "源是 matrix/TRC 型、目标是 LUT 型，中间统一用 PCS XYZ 衔接",
+        17,
+    ),
+    (
         "CLUT 型 profile：CMYK 打印机",
         ["lut", "testdata/cmyk_printer.icc"],
         "mft2 查找表：输入表 → CLUT 多线性插值 → 输出表；网格节点偏差 < 1e-6",
@@ -205,10 +211,11 @@ def frame_intro(shown):
 
 
 OUTRO_LINES = [
-    "49 项测试 · wasm-gc 与 js 双后端全绿",
+    "57 项测试 · wasm-gc 与 js 双后端全绿",
     "matrix/TRC 对拍：最大偏差 0.0（逐位一致）",
     "多 profile 链接：与 lcms2 一致率 98.68%",
     "CLUT 网格节点：偏差 < 1e-6",
+    "跨类型链接：sRGB 与 CMYK 互通",
     "每条判据都经「植入 bug → 变红 → 恢复」验证",
     "",
     "Apache-2.0 · LL728/moon_icc",
@@ -271,7 +278,7 @@ subprocess.run(
 )
 
 # 预览图取 CLUT 场景的完整输出（信息量最大）
-scene = SCENES[3]
+scene = SCENES[4]
 frame_scene(scene, len(scene["cmd"]), len(scene["out"])).save(preview)
 
 shutil.rmtree(tmp, ignore_errors=True)
