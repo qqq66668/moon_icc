@@ -47,9 +47,7 @@ fn main {
     return
   }
   let path = args[1]
-  try {
-    describe(path)
-  } catch {
+  describe(path) catch {
     e => println("解析失败: \{e}")
   }
 }
