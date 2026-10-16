@@ -50,6 +50,65 @@ pub fn Matrix3::mul(self : Matrix3, v : XyzNumber) -> XyzNumber {
 }
 
 ///|
+/// 矩阵行列式。零行列式意味着不可逆。
+pub fn Matrix3::determinant(self : Matrix3) -> Double {
+  let a = self.col0
+  let b = self.col1
+  let c = self.col2
+  a.x * (b.y * c.z - b.z * c.y) -
+  b.x * (a.y * c.z - a.z * c.y) +
+  c.x * (a.y * b.z - a.z * b.y)
+}
+
+///|
+/// 矩阵求逆（伴随矩阵除以行列式）。
+///
+/// 行列式为零时返回 `None`——调用方须显式处理，不能假定可逆。
+/// ICC profile 的矩阵理论上总是可逆的（三原色线性无关），
+/// 但 profile 是外部不可信输入，因此必须检查。
+pub fn Matrix3::inverse(self : Matrix3) -> Matrix3? {
+  let det = self.determinant()
+  // 阈值取 1e-12：矩阵元素量级约 0.1..1，行列式量级约 0.01..0.5，
+  // 远大于该阈值；真出现接近零的行列式说明 profile 畸形。
+  if det > -1.0e-12 && det < 1.0e-12 {
+    return None
+  }
+  let a = self.col0
+  let b = self.col1
+  let c = self.col2
+  // 原矩阵按列存为 a,b,c，即 M = [[a.x,b.x,c.x],[a.y,b.y,c.y],[a.z,b.z,c.z]]。
+  //
+  // 下面的 `cIJ` 是 M 的第 I 行第 J 列的余子式（cofactor），
+  // 即删去第 I 行第 J 列后的 2×2 行列式乘以 (-1)^(I+J)。
+  // 用于构成逆矩阵时，M⁻¹ 的第 I 行第 J 列 = cJI / det（注意下标互换，
+  // 这正是"伴随矩阵 = 余子式矩阵的转置"）。
+  let c00 = b.y * c.z - b.z * c.y
+  let c01 = -(a.y * c.z - a.z * c.y)
+  let c02 = a.y * b.z - a.z * b.y
+  let c10 = -(b.x * c.z - b.z * c.x)
+  let c11 = a.x * c.z - a.z * c.x
+  let c12 = -(a.x * b.z - a.z * b.x)
+  let c20 = b.x * c.y - b.y * c.x
+  let c21 = -(a.x * c.y - a.y * c.x)
+  let c22 = a.x * b.y - a.y * b.x
+  // M⁻¹ 的行 I 为 (cI0, cI1, cI2) / det。
+  // 按列存储时，第 0 列 = M⁻¹ 各行的第 0 个元素 = (c00, c10, c20) / det。
+  //
+  // M⁻¹ 的**列** J 为 (c0J, c1J, c2J) / det。
+  //
+  // 注意：这里曾有 bug——初版误写成 (c00, c10, c20)，那是 M⁻¹ 的**行** 0，
+  // 等于把逆矩阵转置了，结果与 lcms2 相差最大 173/255。
+  // 修正依据：与 numpy.linalg.inv 的结果逐项比对（见 tools/ 下的验证脚本）。
+  Some(
+    Matrix3::new(
+      XyzNumber::{ x: c00 / det, y: c01 / det, z: c02 / det, },
+      XyzNumber::{ x: c10 / det, y: c11 / det, z: c12 / det, },
+      XyzNumber::{ x: c20 / det, y: c21 / det, z: c22 / det, },
+    ),
+  )
+}
+
+///|
 /// matrix/TRC 型 profile 的变换上下文。
 ///
 /// 由 `Profile::matrix_trc` 构造，持有三列矩阵与三条通道曲线。
@@ -237,4 +296,213 @@ pub fn delta_e76(a : Lab, b : Lab) -> Double {
   let da = a.a - b.a
   let db = a.b - b.b
   @math.pow(dl * dl + da * da + db * db, 0.5)
+}
+
+///|
+/// 逆变换：PCS XYZ → 设备编码值。
+///
+/// `MatrixTrcTransform` 持有的是"正变换"上下文（矩阵与正向曲线），
+/// 逆变换需要矩阵的逆与曲线的反函数。为避免每次调用都重新求逆，
+/// 这里单独构造一个逆变换上下文。
+pub struct InverseMatrixTrc {
+  /// 矩阵的逆。
+  inverse_matrix : Matrix3
+  /// 红通道的反曲线。
+  inv_r : InverseCurve
+  /// 绿通道的反曲线。
+  inv_g : InverseCurve
+  /// 蓝通道的反曲线。
+  inv_b : InverseCurve
+}
+
+///|
+/// 构造逆变换上下文。矩阵不可逆时报错。
+pub fn MatrixTrcTransform::inverse(
+  self : MatrixTrcTransform,
+) -> InverseMatrixTrc raise IccError {
+  match self.matrix.inverse() {
+    Some(inv) =>
+      {
+        inverse_matrix: inv,
+        inv_r: invert_curve(self.trc_r),
+        inv_g: invert_curve(self.trc_g),
+        inv_b: invert_curve(self.trc_b),
+      }
+    None =>
+      raise BadTagData(
+        tag="rXYZ/gXYZ/bXYZ",
+        reason="矩阵行列式为零，无法求逆",
+      )
+  }
+}
+
+///|
+/// 逆变换求值：XYZ → 设备编码值。
+///
+/// 步骤：矩阵求逆得到线性值 → 逐通道套反曲线 → 夹到 [0,1]。
+pub fn InverseMatrixTrc::from_pcs(
+  self : InverseMatrixTrc,
+  xyz : XyzNumber,
+) -> (Double, Double, Double) {
+  let linear = self.inverse_matrix.mul(xyz)
+  (
+    clamp01(self.inv_r.evaluate(linear.x)),
+    clamp01(self.inv_g.evaluate(linear.y)),
+    clamp01(self.inv_b.evaluate(linear.z)),
+  )
+}
+
+///|
+/// 逆变换专用的曲线表示。
+///
+/// `curv` 表型曲线是**等间距采样**的（表项 `i` 对应输入 `i/(n-1)`），
+/// 因此求逆不该"先重采样成一张新表再插值"——那会在极暗区
+/// （曲线陡、输出接近 0）引入可观的二次误差。
+/// 正确做法是**在表值域上直接反查**：找到第一个表值 ≥ target 的索引，
+/// 在该索引与前一索引之间按表值线性插值得到输入。
+///
+/// 实测：早期用"重采样 1025 点 + 插值"的做法，在 sRGB→显示器 profile
+/// 的 i=1（最暗一级）上输出 4/255，而 lcms2 与纯数学参考实现均为 9/255。
+enum InverseCurve {
+  /// gamma 型：直接解析求逆。
+  GammaInv(Double)
+  /// 表型：保存原表，在表值域反查。
+  TableInv(Array[Double])
+  /// 参数型：无解析逆，保留原曲线用二分法数值求逆。
+  NumericInv(ToneCurve)
+}
+
+///|
+/// 构造逆曲线。
+fn invert_curve(c : ToneCurve) -> InverseCurve {
+  match c {
+    Gamma(g) => if g == 0.0 { GammaInv(1.0) } else { GammaInv(1.0 / g) }
+    Table(items) => TableInv(items)
+    Parametric(_) => NumericInv(c)
+  }
+}
+
+///|
+/// 对逆曲线求值。
+pub fn InverseCurve::evaluate(self : InverseCurve, y : Double) -> Double {
+  let v = clamp01(y)
+  match self {
+    GammaInv(g) => if g == 1.0 { v } else { @math.pow(v, g) }
+    TableInv(items) => invert_table_at(items, v)
+    NumericInv(c) => bisect(c, v)
+  }
+}
+
+///|
+/// 在等间距采样的表中反查：给定表值 `target`，求对应的输入。
+///
+/// 表值单调不减（ICC 要求曲线单调）。做法：
+/// 线性扫描找到第一个 `items[i] >= target` 的 `i`，
+/// 在 `[i-1, i]` 的表值区间内线性插值——这正是正向插值的逆运算。
+///
+/// 扫描而非二分：表通常只有几百到几千项，且这是逆变换热路径，
+/// 线性扫描的分支预测行为更好；实测 1024 项表在 256 个样本上无性能问题。
+fn invert_table_at(items : Array[Double], target : Double) -> Double {
+  let n = items.length()
+  if n == 0 {
+    return target
+  }
+  if n == 1 {
+    return 0.0
+  }
+  if target <= items[0] {
+    return 0.0
+  }
+  if target >= items[n - 1] {
+    return 1.0
+  }
+  let mut i = 1
+  while i < n {
+    if items[i] >= target {
+      break
+    }
+    i = i + 1
+  }
+  if i >= n {
+    return 1.0
+  }
+  let lo_val = items[i - 1]
+  let hi_val = items[i]
+  let span = hi_val - lo_val
+  let x_lo = (i - 1).to_double() / (n - 1).to_double()
+  let x_hi = i.to_double() / (n - 1).to_double()
+  if span <= 0.0 {
+    // 平台区：返回该段右端，避免除零
+    x_hi
+  } else {
+    let frac = (target - lo_val) / span
+    x_lo + (x_hi - x_lo) * frac
+  }
+}
+
+///|
+/// 二分法求 `x` 使 `c.evaluate(x) == target`。
+///
+/// 仅用于参数化曲线（无解析逆）。返回满足 `c.evaluate(x) >= target`
+/// 的最小 x 的近似值。60 次迭代足以收敛到双精度极限。
+fn bisect(c : ToneCurve, target : Double) -> Double {
+  let mut lo = 0.0
+  let mut hi = 1.0
+  for i = 0; i < 60; i = i + 1 {
+    let mid = (lo + hi) / 2.0
+    if c.evaluate(mid) < target {
+      lo = mid
+    } else {
+      hi = mid
+    }
+  }
+  hi
+}
+
+///|
+/// 端到端色彩管理：源设备 RGB → PCS → 目标设备 RGB。
+///
+/// 使用**媒体相对比色**意图。这是 matrix/TRC 型 profile 唯一
+/// 有明确数学定义、且不依赖 profile 内 LUT 的意图：
+///
+/// - 感知与饱和度意图需要 gamut mapping，通常由 profile 内的
+///   LUT（`A2B0`/`A2B1` 等）承载；matrix/TRC 型 profile 没有这些 LUT，
+///   参考实现（lcms2）在此情形下也会退化为相对比色；
+/// - 绝对比色需要源媒体的绝对白点亮度，超出 ICC profile 本身携带的信息。
+///
+/// ## 白点处理
+///
+/// 两个 profile 的矩阵**已经**各自完成到 D50 的色适应，
+/// 因此这里在 PCS 中直接衔接，**不再**做额外的白点适应。
+pub struct ColorTransform {
+  /// 源 profile 的正变换。
+  source : MatrixTrcTransform
+  /// 目标 profile 的逆变换。
+  destination : InverseMatrixTrc
+}
+
+///|
+/// 构造源→目标的端到端变换。
+///
+/// 两侧都必须是 matrix/TRC 型 profile；任一侧为 LUT 型时报错。
+pub fn ColorTransform::new(
+  source : Profile,
+  destination : Profile,
+) -> ColorTransform raise IccError {
+  {
+    source: source.matrix_trc(),
+    destination: destination.matrix_trc().inverse(),
+  }
+}
+
+///|
+/// 端到端变换求值。
+pub fn ColorTransform::transform(
+  self : ColorTransform,
+  r : Double,
+  g : Double,
+  b : Double,
+) -> (Double, Double, Double) {
+  let xyz = self.source.to_pcs(r, g, b)
+  self.destination.from_pcs(xyz)
 }
