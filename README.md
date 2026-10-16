@@ -16,7 +16,9 @@ MoonBit 生态里已有图像处理与渲染栈（图像编解码、2D 光栅化
 | 能解析 ICC profile 元数据的库 | 用 profile 做**实际色变换** |
 | 图像编解码 | 图像进入/离开色彩工作流时的**色彩管理环节** |
 
-`moon_icc` 补的是中间那一层：**读取 ICC profile，并真的按它做变换**。
+`moon_icc` 补的是中间那一层：**读取 ICC profile，并真的按它做变换**——
+从单个 profile 的色空间变换（设备编码值 ↔ PCS XYZ ↔ Lab），
+到源设备到目标设备的完整色彩管理链路。
 
 ## 安装
 
@@ -66,6 +68,31 @@ let lab = @moon_icc.xyz_to_lab(xyz)
 println(lab.l)  // 53.585...
 ```
 
+### 源 profile → 目标 profile（多 profile 链接）
+
+```moonbit
+let src = @moon_icc.Profile::parse(@fs.read_file_to_bytes("sRGB Color Space Profile.icc"))
+let dst = @moon_icc.Profile::parse(@fs.read_file_to_bytes("display.icc"))
+
+// 媒体相对比色意图；两侧都必须是 matrix/TRC 型 profile
+let link = @moon_icc.ColorTransform::new(src, dst)
+let (r, g, b) = link.transform(0.5, 0.5, 0.5)
+```
+
+命令行等价形式：
+
+```
+moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/display.icc
+```
+
+输出 0..255 的灰阶映射，可直接与 lcms2 之类的参考实现比对：
+
+```
+link 0 0 0 0
+link 1 10 0 3
+...
+```
+
 ### 命令行示例
 
 仓库自带一个可运行的示例程序：
@@ -73,6 +100,7 @@ println(lab.l)  // 53.585...
 ```
 moon run cmd/main --target wasm-gc -- parse testdata/srgb.icc
 moon run cmd/main --target wasm-gc -- transform testdata/srgb.icc
+moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/display.icc
 ```
 
 `parse` 输出 profile 的头部与 tag 表：
@@ -109,8 +137,72 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | tag 数据解析（`XYZ ` / `curv` / `para`） | ✅ 已完成并验证 |
 | matrix/TRC 类型 profile → PCS XYZ 变换 | ✅ 已完成并验证 |
 | XYZ ↔ Lab 转换与 CIE76 色差 | ✅ 已完成并验证 |
-| 渲染意图选择（感知 / 相对比色） | 计划中 |
+| 逆变换（PCS XYZ → 设备 RGB）与矩阵求逆 | ✅ 已完成并验证 |
+| 多 profile 链接（源设备 → PCS → 目标设备） | ✅ 已完成并验证 |
+| 媒体相对比色意图 | ✅ 已完成并验证 |
+| 感知 / 饱和度 / 绝对比色意图 | 不做（依赖 profile 内 LUT，见下） |
 | CLUT 型 profile 变换（CMYK 打印机） | 计划中 |
+
+## 渲染意图：为什么只做媒体相对比色
+
+ICC 定义四种意图，但**只有媒体相对比色对 matrix/TRC 型 profile 有纯数学定义**：
+
+- **感知**与**饱和度**需要 gamut mapping，通常由 profile 内的 LUT
+  （`A2B0`/`A2B1` 等）承载；matrix/TRC 型 profile 没有这些 LUT。
+  实测 lcms2 对这类 profile 的四种意图给出**完全相同**的结果，
+  印证了它同样退化为相对比色。
+- **绝对比色**需要源媒体的绝对白点亮度，超出 ICC profile 本身携带的信息。
+
+因此本库对 matrix/TRC 型 profile 固定使用媒体相对比色——这是可验证、
+可对拍的选择，而不是省略。
+
+## 与 lcms2 的交叉核对（重要）
+
+端到端链接结果与 **lcms2**（业界标准 CMM，经 Pillow 的 `ImageCms` 调用）
+用 4096 个随机彩色样本交叉核对。判据是三条，均可证伪：
+
+1. 完全一致率 **≥ 98%**（实测 **98.68%**）；
+2. 最大偏差 **≤ 3 级**（8 位量化）；
+3. **偏差 ≥2 级的通道，其 lcms2 输出必须 ≤ 8**——把成因钉在极暗区。
+
+为什么不是零容差？追查后的结论是**差异来自 lcms2 一侧的两个已知特性**：
+
+**（一）lcms2 默认走 CLUT 近似。** 它链接两个 profile 时会构建 3D CLUT
+并插值（速度优先）。同一批样本实测：
+
+| lcms2 flags | 与本库完全一致 | 最大偏差 |
+|---|---|---|
+| NONE（默认） | 3942/4096 | 4 级 |
+| **NOOPTIMIZE** | **4042/4096** | 3 级 |
+| FORCE_CLUT | 3370/4096 | **11 级** |
+
+强制走 CLUT 会让一致率与最大偏差同时显著恶化——这直接证明默认路径的差异
+来自 lcms2 自身的近似。金标因此取 `NOOPTIMIZE` 这条精确通路。
+
+**（二）8 位量化边界与 16 位流水线分辨率。** lcms2 在 16 位域上传递中间值。
+实测偏差分布：
+
+| 偏差 | 例数 | 目标线性值范围 | lcms2 输出 |
+|---|---|---|---|
+| 1 级 | 39 | 1.9e-4 .. 9.5e-1（全范围） | 7 .. 248 |
+| 2 级 | 9 | 6.7e-5 .. 1.8e-4（极暗） | 2 .. 6 |
+| 3 级 | 6 | 8.7e-5 .. 1.2e-4（极暗） | 3 .. 4 |
+
+即：±1 级是全范围的量化边界翻转；**≥2 级只出现在极暗区**——那里目标线性值
+仅约 1e-4，在 16 位域只有 6~8 个量化级，lcms2 的输出本身就有数级不确定度，
+而本库全程双精度。
+
+**独立证据的另一条腿**：本库与"按 ICC 规范逐字转写的独立双精度实现"
+（`tools/diff_oracle.py`）在全部样本上**逐位一致**，因此上面是交叉核对，
+本库的正确性不单独依赖 lcms2。
+
+复现全部数字：
+
+```
+python tools/gen_golden.py            # 生成金标（lcms2 NOOPTIMIZE）
+python tools/lcms2_flags_check.py     # 复现 flags 对比表
+python tools/lcms2_deviation_report.py # 复现偏差分布表
+```
 
 ## 变换顺序与白点（实现要点）
 
@@ -141,12 +233,12 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 
 以下内容**不在**本项目范围内，写在此处以免误用：
 
-- **CLUT 型 profile 变换**（`mft1` / `mft2` / `mAB` / `mBA`）：当前版本能正确**解析**这类 profile，但不对其做变换——调用 `matrix_trc()` 会返回 `BadTagData` 明确报错，而不是静默给出错误颜色（测试覆盖了这条路径：CMYK 打印机 profile 必须显式失败）。
-- **渲染意图选择**（感知 / 相对比色 / 饱和度 / 绝对比色）：解析阶段能读出该字段，变换阶段尚未使用。
-- **多 profile 链接**（设备→PCS→设备）：不做。
+- **CLUT 型 profile 变换**（`mft1` / `mft2` / `mAB` / `mBA`）：当前版本能正确**解析**这类 profile，但不对其做变换——源或目标任一侧是 LUT 型时，`matrix_trc()` / `ColorTransform::new()` 会返回 `BadTagData` 明确报错，而不是静默给出错误颜色（测试覆盖了这条路径：CMYK 打印机 profile 必须显式失败）。
+- **感知 / 饱和度 / 绝对比色意图**：前两者依赖 profile 内 LUT，后者需要绝对白点亮度；理由见上文「渲染意图」一节。头部字段仍可正常解析读出。
+- **黑点补偿（BPC）**：不做。
 - **CMYK 输出**：依赖 CLUT，不在范围内。
 - **图像文件读写**（PNG / JPEG / TIFF）：本库只处理色彩数值，不碰图像容器。
-- **软打样、黑点补偿、色貌模型**：不做。
+- **软打样、色貌模型**：不做。
 
 ## 设计要点
 
@@ -170,7 +262,7 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 30 项测试
+moon test --target wasm-gc     # 38 项测试
 moon test --target js          # 同一套测试，js 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
@@ -180,11 +272,16 @@ python tools/diff_oracle.py js         # 同上，js 后端
 
 1. **合成字节流**：精确构造每个字段，验证解析逻辑本身（含畸形输入）；
 2. **真实 profile**：用 Windows 系统自带的 3 个真实 profile，覆盖 matrix/TRC 型（sRGB）、真实显示器 profile、CMYK/LUT 型（打印机）；
-3. **外部 oracle**：`tools/diff_oracle.py` 用 Python `struct` 模块**独立**按规范解析同一批文件并**独立重做 matrix/TRC 变换**，与本库输出逐字段、逐样本比对。
+3. **外部 oracle**：两个来源——
+   - `tools/diff_oracle.py`：Python `struct` **独立**按规范解析并**独立重做** matrix/TRC 变换，与本库逐字段、逐样本比对；
+   - `link_golden_wbtest.mbt`：lcms2 生成的 4096 个彩色样本金标（见上文交叉核对）。
 
-第 3 层是关键：被测实现与判据必须来源不同，否则"我又写了一遍"不构成独立证据。
+**实测结果**：
 
-**实测结果**：3 个 profile × 15 个变换样本 × 3 个分量，**最大偏差 0.0（逐位一致）**，wasm-gc 与 js 双后端相同。容差因此设为 `1e-15`——参考自身离散度为零，就按紧值设，让结构性错误必然触发失败。
+- 差分对拍：3 个 profile × 15 个变换样本 × 3 个分量，**最大偏差 0.0（逐位一致）**，
+  wasm-gc 与 js 双后端相同。容差因此设为 `1e-15`——参考自身离散度为零，
+  就按紧值设，让结构性错误必然触发失败。
+- 与 lcms2 交叉核对：一致率 98.68%，判据见上文。
 
 **判据验证**（主动植入 bug 确认判据是活的，不是空转）：
 
@@ -192,6 +289,11 @@ python tools/diff_oracle.py js         # 同上，js 后端
 |---|---|---|
 | `renderingIntent` 读取位置错位 | 3 项变红 | 12 处不一致 |
 | TRC 与矩阵顺序颠倒 | 5 项变红（含中间调用例，白点偏离 D50 达 17.3 色差） | 变换样本全红 |
+| 矩阵求逆漏掉转置 | **5 项变红**（lcms2 一致率跌到 0%、恒等变换偏差 14 级、`M·M⁻¹` 偏差 0.49） | — |
+
+最后一条是开发中真实出现过的 bug：逆矩阵写成了转置，与 lcms2 在 8 位域上
+最大差 **173/255**。**灰阶样本完全测不出它**（灰阶只走矩阵的对角路径），
+是 4096 个**彩色**样本把它抓出来的——这正是金标必须用彩色随机样本的原因。
 
 ## 参考与移植说明
 
