@@ -1,0 +1,7 @@
+import {
+  "LL728/moon_icc",
+  "moonbitlang/core/env",
+  "moonbitlang/x/fs",
+}
+
+pkgtype(kind: "executable")
