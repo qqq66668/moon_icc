@@ -85,13 +85,22 @@ fn read_and_transform(path : String) -> Unit raise {
 ///
 /// 驱动样本是灰阶（输入三通道相同）。对 CMYK 目标而言这不是"灰度"——
 /// 因为 CMYK 有四通道，灰阶只覆盖其中一个切片，但足以对比实现差异。
-fn read_and_link(source_path : String, dest_path : String) -> Unit raise {
+///
+/// `intent` 用**意图名**而不是数字，避免在此处引入整数解析：
+/// `perceptual` / `relative` / `saturation` / `absolute`。
+fn read_and_link(
+  source_path : String,
+  dest_path : String,
+  intent : Int32,
+) -> Unit raise {
   let src_data = @fs.read_file_to_bytes(source_path)
   let dst_data = @fs.read_file_to_bytes(dest_path)
-  let transform = @moon_icc.ColorTransform::new(
+  let transform = @moon_icc.ColorTransform::with_intent(
     @moon_icc.Profile::parse(src_data),
     @moon_icc.Profile::parse(dst_data),
+    intent,
   )
+  println("intent \{intent}")
   println("src_channels \{transform.source_channels()}")
   println("dst_channels \{transform.destination_channels()}")
   for i = 0; i <= 255; i = i + 1 {
@@ -102,6 +111,18 @@ fn read_and_link(source_path : String, dest_path : String) -> Unit raise {
       buf.write(" \{quantise8(x)}")
     }
     println("link \{i}\{buf.to_string()}")
+  }
+}
+
+///|
+/// 把意图名解析为编号；无法识别时返回 `None`（不静默回退）。
+fn parse_intent(name : String) -> Int32? {
+  match name {
+    "perceptual" => Some(0)
+    "relative" => Some(1)
+    "saturation" => Some(2)
+    "absolute" => Some(3)
+    _ => None
   }
 }
 
@@ -170,8 +191,13 @@ fn main {
       println("用法:")
       println("  moon run cmd/main -- parse <icc-profile 路径>")
       println("  moon run cmd/main -- transform <icc-profile 路径>")
-      println("  moon run cmd/main -- link <源 profile> <目标 profile>")
+      println(
+        "  moon run cmd/main -- link <源 profile> <目标 profile> [意图]",
+      )
       println("  moon run cmd/main -- lut <LUT 型 profile 路径>")
+      println("")
+      println("意图可选（默认 relative）:")
+      println("  perceptual | relative | saturation | absolute")
     }
     Some(i) => {
       let command = args[i]
@@ -190,10 +216,30 @@ fn main {
           read_and_transform(args[i + 1]) catch {
             e => println("变换失败: \{e}")
           }
-        "link" =>
-          read_and_link(args[i + 1], args[i + 2]) catch {
+        "link" => {
+          // 意图是可选的第 3 个参数；给了但无法识别则报错，不静默回退
+          let intent_arg = if i + 3 < args.length() {
+            Some(args[i + 3])
+          } else {
+            None
+          }
+          let intent = match intent_arg {
+            None => 1
+            Some(name) =>
+              match parse_intent(name) {
+                Some(v) => v
+                None => {
+                  println(
+                    "无法识别的意图 \"\{name}\"（可选: perceptual / relative / saturation / absolute）",
+                  )
+                  return
+                }
+              }
+          }
+          read_and_link(args[i + 1], args[i + 2], intent) catch {
             e => println("链接失败: \{e}")
           }
+        }
         "lut" =>
           describe_lut(args[i + 1]) catch {
             e => println("LUT 求值失败: \{e}")

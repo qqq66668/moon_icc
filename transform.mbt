@@ -479,6 +479,11 @@ pub struct ColorTransform {
   source : SourceStage
   /// 目标侧：PCS XYZ → 设备。
   destination : DestinationStage
+  /// 渲染意图编号（0..3）。
+  ///
+  /// 对 LUT 型 profile，意图在构造时就已体现为「选哪张表」；这里保留编号
+  /// 是为了让调用方能查询，并供未来实现绝对比色的 PCS 缩放使用。
+  intent : Int32
 }
 
 ///|
@@ -573,21 +578,69 @@ fn build_destination(
 }
 
 ///|
-/// 构造源→目标的端到端变换。
+/// 构造源→目标的端到端变换，使用**媒体相对比色**（编号 1）。
 ///
 /// 两侧各自可以是 matrix/TRC 型或 LUT 型，四种组合都支持：
 /// 中间统一用 PCS XYZ 衔接。因此 sRGB → CMYK 打印机这样的跨类型链接可用。
-///
-/// 渲染意图固定为媒体相对比色（编号 1），理由见上文。
 pub fn ColorTransform::new(
   source : Profile,
   destination : Profile,
 ) -> ColorTransform raise IccError {
-  let intent = 1
+  ColorTransform::with_intent(source, destination, 1)
+}
+
+///|
+/// 构造源→目标的端到端变换，指定渲染意图。
+///
+/// | 编号 | 意图 | 对 LUT 型 profile 的效果 |
+/// |------|------|------------------------|
+/// | 0 | 感知 | 用 `A2B0`/`B2A0` |
+/// | 1 | 媒体相对比色 | 用 `A2B1`/`B2A1` |
+/// | 2 | 饱和度 | 用 `A2B2`/`B2A2` |
+/// | 3 | 绝对比色 | 同 1（**已知限制**，见下） |
+///
+/// **matrix/TRC 型 profile 四种意图等价**：这类 profile 只有一组矩阵与曲线，
+/// 没有按意图分开的数据。这不是本库的省略——实测 lcms2 对
+/// sRGB → 显示器 这组 profile 对，四种意图给出**逐位相同**的结果
+/// （见 `tools/lcms2_intent_check.py`）。
+///
+/// 反之对含多个 LUT 的 profile（如本机 CMYK 打印机），意图确实可区分：
+/// 实测以媒体相对比色为基准，感知差 35 级、饱和度差 255 级、绝对差 20 级。
+///
+/// ## 绝对比色（编号 3）为什么与 1 相同
+///
+/// 绝对比色需要在 PCS 上做白点缩放。本项目尝试过
+/// 「源侧乘 `wtpt/D50`、目标侧乘 `D50/wtpt`」这一标准形式，实测与 lcms2 的
+/// 偏差从 20 级**恶化到 107 级**，说明该形式与参考实现的实际语义不符。
+///
+/// 由于无法从可用材料确定参考实现的绝对比色语义，本库**不实现**它，
+/// 而是让编号 3 走与相对比色相同的路径（与 lcms2 的差异 ≤ 20 级），
+/// 并在 README 的「明确不做」中如实记录。发布一个会把结果改坏的猜测实现，
+/// 比承认这项限制更糟。
+///
+/// 非法编号（负数或大于 3）会被拒绝，不静默回退到默认意图。
+pub fn ColorTransform::with_intent(
+  source : Profile,
+  destination : Profile,
+  intent : Int32,
+) -> ColorTransform raise IccError {
+  if intent < 0 || intent > 3 {
+    raise BadTagData(
+      tag="renderingIntent",
+      reason="渲染意图编号应在 0..3，实际 \{intent}",
+    )
+  }
   {
     source: build_source(source, intent),
     destination: build_destination(destination, intent),
+    intent,
   }
+}
+
+///|
+/// 该变换使用的渲染意图编号。
+pub fn ColorTransform::intent(self : ColorTransform) -> Int32 {
+  self.intent
 }
 
 ///|
@@ -667,6 +720,12 @@ pub fn ColorTransform::transform_values(
   self : ColorTransform,
   inputs : Array[Double],
 ) -> Array[Double] {
+  // 注意：**不做**绝对比色的白点缩放。
+  //
+  // 曾按「源侧乘 wtpt/D50、目标侧乘 D50/wtpt」实现过，实测与 lcms2 的
+  // 偏差从 20 级**恶化到 107 级**，说明该公式与参考实现的绝对比色语义不符。
+  // 与其发布一个把结果改坏的猜测实现，不如维持与相对比色一致，
+  // 并把差异如实记录（见 README 的「明确不做」与 intent_wbtest.mbt）。
   self.destination.from_pcs(self.source.to_pcs(inputs))
 }
 

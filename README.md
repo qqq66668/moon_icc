@@ -140,6 +140,8 @@ link 1 1 2 1 255
 moon run cmd/main --target wasm-gc -- parse testdata/srgb.icc
 moon run cmd/main --target wasm-gc -- transform testdata/srgb.icc
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/display.icc
+moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc
+moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc saturation
 moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
 ```
 
@@ -182,7 +184,8 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | 媒体相对比色意图 | ✅ 已完成并验证 |
 | CLUT 型 profile 变换（`mft1` / `mft2`，CMYK 打印机等） | ✅ 已完成并验证 |
 | 跨类型链接（matrix/TRC ↔ LUT 任意组合） | ✅ 已完成并验证 |
-| 感知 / 饱和度 / 绝对比色意图 | 仅经 LUT tag 选取，不做 gamut mapping |
+| 渲染意图：感知 / 媒体相对比色 / 饱和度 | ✅ 已完成并验证 |
+| 渲染意图：绝对比色 | **已知限制**，见下文（与相对比色相同路径） |
 | `mAB` / `mBA`（ICC v4 LUT） | 计划中 |
 | PCS 为 `XYZ ` 的 LUT 型 profile | 计划中 |
 
@@ -252,19 +255,6 @@ moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
 `tools/gen_clut_golden.py`），否则测到的是节点之间的插值结果，
 节点判据就失效了。
 
-## 渲染意图：为什么只做媒体相对比色
-
-ICC 定义四种意图，但**只有媒体相对比色对 matrix/TRC 型 profile 有纯数学定义**：
-
-- **感知**与**饱和度**需要 gamut mapping，通常由 profile 内的 LUT
-  （`A2B0`/`A2B1` 等）承载；matrix/TRC 型 profile 没有这些 LUT。
-  实测 lcms2 对这类 profile 的四种意图给出**完全相同**的结果，
-  印证了它同样退化为相对比色。
-- **绝对比色**需要源媒体的绝对白点亮度，超出 ICC profile 本身携带的信息。
-
-因此本库对 matrix/TRC 型 profile 固定使用媒体相对比色——这是可验证、
-可对拍的选择，而不是省略。
-
 ## 与 lcms2 的交叉核对（重要）
 
 端到端链接结果与 **lcms2**（业界标准 CMM，经 Pillow 的 `ImageCms` 调用）
@@ -310,11 +300,54 @@ ICC 定义四种意图，但**只有媒体相对比色对 matrix/TRC 型 profile
 ```
 python tools/gen_golden.py             # 生成链接金标（lcms2 NOOPTIMIZE）
 python tools/gen_clut_golden.py        # 生成 CLUT 金标（网格节点 + lcms2）
+python tools/gen_cross_link_golden.py  # 生成跨类型链接金标
+python tools/gen_intent_golden.py      # 生成四种渲染意图金标
 python tools/lcms2_flags_check.py      # 复现 flags 对比表
 python tools/lcms2_deviation_report.py # 复现链接偏差分布表
+python tools/lcms2_intent_check.py     # 复现"哪些 profile 能区分意图"
 python tools/diff_oracle.py wasm-gc    # 独立 Python 规范实现差分
 python tools/make_demo_video.py        # 重新生成演示视频
 ```
+
+## 渲染意图
+
+四种意图经 `ColorTransform::with_intent` 指定，命令行用意图名：
+
+```
+moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc saturation
+```
+
+| 编号 | 名称 | 命令行 | 对 LUT 型 profile 的效果 |
+|---|---|---|---|
+| 0 | 感知 | `perceptual` | 用 `A2B0`/`B2A0` |
+| 1 | 媒体相对比色（默认） | `relative` | 用 `A2B1`/`B2A1` |
+| 2 | 饱和度 | `saturation` | 用 `A2B2`/`B2A2` |
+| 3 | 绝对比色 | `absolute` | **同 1（已知限制，见下）** |
+
+非法名称会被拒绝并给出可选值，不静默回退到默认意图。
+
+### matrix/TRC 型 profile 四种意图等价
+
+这类 profile 只有一组矩阵与曲线，没有按意图分开的数据。这不是本库的省略：
+实测 lcms2 对 sRGB → 显示器 这组 profile 对，四种意图给出**逐位相同**的结果
+（复现：`python tools/lcms2_intent_check.py`）。
+
+### 含多张 LUT 的 profile 意图确实可区分
+
+以本机 CMYK 打印机 profile 为例，以媒体相对比色为基准，感知差 35 级、
+饱和度差 255 级、绝对差 20 级。本库对 0/1/2 三种意图与 lcms2 交叉核对，
+200 个随机 RGB 样本、8 位域下**最大偏差 ≤ 2 级、一致率 ≥ 60%**。
+
+### 绝对比色是已知限制
+
+绝对比色需要在 PCS 上做白点缩放。本项目按标准形式实现过
+「源侧乘 `wtpt/D50`、目标侧乘 `D50/wtpt`」，实测与 lcms2 的偏差
+**从 20 级恶化到 107 级**，说明该形式与参考实现的实际语义不符。
+
+由于无法从可用材料确定参考实现的绝对比色语义，本库**不实现**它：
+编号 3 走与相对比色相同的路径（与 lcms2 的差异 ≤ 20 级），并在测试中
+显式断言「编号 3 与编号 1 逐点相同」。发布一个会把结果改坏的猜测实现，
+比承认这项限制更糟。
 
 ## 变换顺序与白点（实现要点）
 
@@ -345,7 +378,8 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 
 以下内容**不在**本项目范围内，写在此处以免误用：
 
-- **感知 / 饱和度 / 绝对比色意图的 gamut mapping**：LUT 型 profile 可按意图选取不同的 LUT tag（见上），但 matrix/TRC 型 profile 没有 LUT，无法做 gamut mapping；绝对比色所需的绝对白点亮度也不在 profile 内。详见上文「渲染意图」一节。
+- **绝对比色的白点缩放**：编号 3 当前与媒体相对比色（编号 1）相同。本项目按标准形式实现过白点缩放，但实测与 lcms2 的偏差从 20 级恶化到 107 级，说明该形式与参考实现的语义不符；在无法确定参考语义前不发布猜测实现。详见上文「渲染意图」。
+- **感知 / 饱和度意图的 gamut mapping**：本库通过选取 `A2B0`/`A2B2` 表来体现意图，与 lcms2 在这两种意图下交叉核对通过；但不自行做色域映射（映射规则由 profile 内的 LUT 承载）。
 - **`mAB` / `mBA`**（ICC v4 的 lutAToBType / lutBToAType）：当前的 LUT 支持只覆盖 v2 的 `mft1` / `mft2`；遇到 v4 LUT 类型会返回 `BadTagData` 明确报错。
 - **PCS 为 `XYZ ` 的 LUT 型 profile**：XYZ 的编码范围与 Lab 不同，尚未实现，会显式报错而非静默给出错误颜色。
 - **黑点补偿（BPC）**：不做。
@@ -374,7 +408,7 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 57 项测试
+moon test --target wasm-gc     # 63 项测试
 moon test --target js          # 同一套测试，js 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
@@ -384,11 +418,12 @@ python tools/diff_oracle.py js         # 同上，js 后端
 
 1. **合成字节流**：精确构造每个字段，验证解析逻辑本身（含畸形输入）；
 2. **真实 profile**：用 Windows 系统自带的 3 个真实 profile，覆盖 matrix/TRC 型（sRGB）、真实显示器 profile、CMYK/LUT 型（打印机）；
-3. **外部 oracle**：四个来源——
+3. **外部 oracle**：五个来源——
    - `tools/diff_oracle.py`：Python `struct` **独立**按规范解析并**独立重做** matrix/TRC 变换，与本库逐字段、逐样本比对；
    - `link_golden_wbtest.mbt`：lcms2 生成的 4096 个彩色样本金标（matrix/TRC → matrix/TRC）；
    - `clut_golden_wbtest.mbt`：625 个 CLUT 网格节点 + 300 个 lcms2 CMYK 样本；
    - `cross_link_golden_wbtest.mbt`：lcms2 生成的跨类型链接金标（sRGB ↔ CMYK 各 300 个随机样本）；
+   - `intent_golden_wbtest.mbt`：lcms2 生成的四种渲染意图金标（200 个随机 RGB 样本，四意图共用输入）；
 4. **网格节点**：CLUT 节点值不依赖插值细节，任何正确实现在节点上都必须
    返回存储值。这一层单独钉住**解析、索引步长、Lab 解码**。
 
@@ -403,6 +438,9 @@ python tools/diff_oracle.py js         # 同上，js 后端
 - 跨类型链接对 lcms2（各 300 个随机样本，8 位域）：
   - sRGB → CMYK：完全一致 **297/300（99%）**，最大偏差 ≤ 2 级；
   - CMYK → sRGB：完全一致 173、差 1 级 125、差 2 级 2，最大偏差 2 级。
+- 渲染意图对 lcms2（200 个随机样本，8 位域）：感知 / 相对比色 / 饱和度
+  三种意图**最大偏差 ≤ 2 级、一致率 ≥ 60%**；绝对比色见上文「已知限制」。
+
 
 **判据验证**（主动植入 bug 确认判据是活的，不是空转）：
 
