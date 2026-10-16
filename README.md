@@ -4,6 +4,12 @@
 
 [![CI](https://github.com/LL728/moon_icc/actions/workflows/ci.yml/badge.svg)](https://github.com/LL728/moon_icc/actions/workflows/ci.yml)
 
+![演示预览](demo/preview.png)
+
+▶ **[演示视频（39 秒，1280×720）](demo/moon_icc-demo.mp4)** —
+视频里的每一行都是当场运行 `moon run cmd/main` 四个子命令的真实输出，
+不是摆拍。可用 `python tools/make_demo_video.py` 重新生成。
+
 ## 这个库解决什么问题
 
 MoonBit 生态里已有图像处理与渲染栈（图像编解码、2D 光栅化、PDF 读写、排版引擎），但**没有色彩管理**：它们可以解出像素、画出图形、排出页面，却无法回答一个基础问题——**这些 RGB 数值在目标设备上到底是什么颜色**。
@@ -268,9 +274,12 @@ ICC 定义四种意图，但**只有媒体相对比色对 matrix/TRC 型 profile
 复现全部数字：
 
 ```
-python tools/gen_golden.py            # 生成金标（lcms2 NOOPTIMIZE）
-python tools/lcms2_flags_check.py     # 复现 flags 对比表
-python tools/lcms2_deviation_report.py # 复现偏差分布表
+python tools/gen_golden.py             # 生成链接金标（lcms2 NOOPTIMIZE）
+python tools/gen_clut_golden.py        # 生成 CLUT 金标（网格节点 + lcms2）
+python tools/lcms2_flags_check.py      # 复现 flags 对比表
+python tools/lcms2_deviation_report.py # 复现链接偏差分布表
+python tools/diff_oracle.py wasm-gc    # 独立 Python 规范实现差分
+python tools/make_demo_video.py        # 重新生成演示视频
 ```
 
 ## 变换顺序与白点（实现要点）
