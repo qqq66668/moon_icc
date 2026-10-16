@@ -17,6 +17,18 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 PROFILES = ["srgb.icc", "display.icc", "cmyk_printer.icc"]
 
+# 变换对拍的绝对容差。
+#
+# 取值依据（实测，非拍脑袋）：先用 1e-12 的哨兵值跑一次，量出实际离散度。
+# 结果：3 个 profile × 15 个样本 × 3 个分量，**最大偏差 0.0（逐位一致）**。
+# 两边都是 IEEE 754 双精度，输入是同一批整数（TRC 表的 u16 与矩阵的
+# s15Fixed16），TRC 表插值与矩阵乘的运算顺序也一致，因此没有可观测分歧。
+#
+# 既然参考自身的离散度是 0，容差就设成一个仍能捕捉真实回归的紧值：
+# 1e-15 足以容纳任何平台相关的末位舍入，同时让"中间调写错""顺序颠倒"
+# 这类结构性错误（偏差量级 1e-2 以上）必然触发失败。
+TOLERANCE = 1e-15
+
 
 def parse_with_python(path):
     """按 ICC.1 规范独立解析，返回与 MoonBit CLI 相同结构的字典。"""
@@ -63,7 +75,7 @@ def parse_with_python(path):
 
 def parse_with_moonbit(path, target):
     """跑 MoonBit CLI，解析其纯文本输出。"""
-    cmd = ["moon", "run", "cmd/main", "--target", target, "--", path]
+    cmd = ["moon", "run", "cmd/main", "--target", target, "--", "parse", path]
     r = subprocess.run(
         cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=300
     )
@@ -139,6 +151,144 @@ def compare(name, py, mb):
     return diffs
 
 
+def transform_with_python(path):
+    """用 Python 独立实现 matrix/TRC 变换，返回 {v: (X, Y, Z)}。
+
+    这是功能 2 的独立判据：不调用库的任何代码，
+    按 ICC.1 规范自行读 TRC 表、套矩阵。
+
+    只支持 matrix/TRC 型 profile（有 rXYZ/gXYZ/bXYZ/rTRC/gTRC/bTRC）。
+    LUT 型（如 CMYK 打印机）返回 None。
+    """
+    with open(path, "rb") as f:
+        d = f.read()
+
+    n = struct.unpack(">I", d[128:132])[0]
+    tags = {}
+    for i in range(n):
+        o = 132 + i * 12
+        sig = d[o : o + 4].decode("ascii")
+        off, sz = struct.unpack(">II", d[o + 4 : o + 12])
+        tags[sig] = (off, sz)
+
+    needed = ["rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"]
+    if any(k not in tags for k in needed):
+        return None
+
+    def read_xyz(sig):
+        off, _ = tags[sig]
+        assert d[off : off + 4] == b"XYZ "
+        return struct.unpack(">3i", d[off + 8 : off + 20])
+
+    # 矩阵按列存：三列分别是 rXYZ/gXYZ/bXYZ
+    cols = [read_xyz("rXYZ"), read_xyz("gXYZ"), read_xyz("bXYZ")]
+    M = [[v / 65536.0 for v in c] for c in cols]
+
+    def read_trc(sig):
+        """返回一个求值函数 v -> linear。"""
+        off, _ = tags[sig]
+        ttype = d[off : off + 4]
+        if ttype == b"curv":
+            cnt = struct.unpack(">I", d[off + 8 : off + 12])[0]
+            if cnt == 0:
+                return lambda x: x
+            if cnt == 1:
+                g = struct.unpack(">H", d[off + 12 : off + 14])[0] / 256.0
+                return lambda x: x**g
+            tbl = struct.unpack(f">{cnt}H", d[off + 12 : off + 12 + cnt * 2])
+            tbl = [v / 65535.0 for v in tbl]
+
+            def ev(x):
+                if x <= 0:
+                    return tbl[0]
+                if x >= 1:
+                    return tbl[-1]
+                pos = x * (cnt - 1)
+                lo = int(pos)
+                if lo >= cnt - 1:
+                    return tbl[-1]
+                frac = pos - lo
+                return tbl[lo] * (1 - frac) + tbl[lo + 1] * frac
+
+            return ev
+        raise NotImplementedError(f"未支持的 TRC 类型 {ttype!r}")
+
+    trcs = [read_trc("rTRC"), read_trc("gTRC"), read_trc("bTRC")]
+
+    def to_xyz(v):
+        lin = [trcs[0](v), trcs[1](v), trcs[2](v)]
+        return (
+            M[0][0] * lin[0] + M[1][0] * lin[1] + M[2][0] * lin[2],
+            M[0][1] * lin[0] + M[1][1] * lin[1] + M[2][1] * lin[2],
+            M[0][2] * lin[0] + M[1][2] * lin[1] + M[2][2] * lin[2],
+        )
+
+    return {v: to_xyz(v) for v in SAMPLES}
+
+
+SAMPLES = [
+    0.0,
+    0.05,
+    0.1,
+    0.2,
+    0.25,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.7,
+    0.75,
+    0.8,
+    0.9,
+    0.95,
+    1.0,
+]
+
+
+def transform_with_moonbit(path, target):
+    """跑 CLI 的 transform 子命令，返回 {v: (X, Y, Z)}。"""
+    cmd = ["moon", "run", "cmd/main", "--target", target, "--", "transform", path]
+    r = subprocess.run(
+        cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=300
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"MoonBit CLI 退出码 {r.returncode}\n{r.stdout}\n{r.stderr}")
+    out = {}
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 8 and parts[0] == "sample":
+            v = float(parts[1])
+            out[v] = (float(parts[2]), float(parts[3]), float(parts[4]))
+    return out
+
+
+def compare_transforms(py, mb, tol):
+    """比对变换结果，返回差异列表。
+
+    容差来源：两边都是 IEEE 754 双精度、同一批整数输入，
+    差异只应来自浮点舍入与库函数的实现差异（pow/cbrt）。
+    这里用绝对容差，且容差取值由实测离散度决定，不拍脑袋。
+    """
+    diffs = []
+    if len(py) != len(mb):
+        diffs.append(f"  样本数: python={len(py)} moonbit={len(mb)}")
+        return diffs
+    worst = 0.0
+    for v in py:
+        if v not in mb:
+            diffs.append(f"  样本 {v} 在 MoonBit 输出中缺失")
+            continue
+        for i, axis in enumerate("XYZ"):
+            a, b = py[v][i], mb[v][i]
+            dev = abs(a - b)
+            worst = max(worst, dev)
+            if dev > tol:
+                diffs.append(
+                    f"  样本 v={v} {axis}: python={a!r} moonbit={b!r} 差={dev:.3e}"
+                )
+    return diffs, worst
+
+
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else "wasm-gc"
     here = os.path.dirname(os.path.abspath(__file__))
@@ -163,10 +313,32 @@ def main():
                 f"[一致] {name}: 头部 9 个字段 + {py['tagcount']} 个 tag 条目全部吻合"
             )
 
+        # ---- 功能 2：matrix/TRC 变换对拍 ----
+        py_t = transform_with_python(path)
+        if py_t is None:
+            print(f"[跳过] {name}: 非 matrix/TRC 型 profile，不做变换对拍")
+            continue
+        mb_t = transform_with_moonbit(path, target)
+        result = compare_transforms(py_t, mb_t, TOLERANCE)
+        if isinstance(result, tuple):
+            t_diffs, worst = result
+        else:
+            t_diffs, worst = result, float("inf")
+        if t_diffs:
+            total_diffs += len(t_diffs)
+            print(f"[变换不一致] {name}")
+            for line in t_diffs:
+                print(line)
+        else:
+            print(
+                f"[变换一致] {name}: {len(py_t)} 个样本 × 3 个分量，"
+                f"最大偏差 {worst:.3e}（容差 {TOLERANCE:.1e}）"
+            )
+
     if total_diffs:
         print(f"\n差分失败：共 {total_diffs} 处不一致")
         return 1
-    print("\n差分通过：Python 独立解析与 MoonBit 库输出完全一致")
+    print("\n差分通过：Python 独立实现与 MoonBit 库输出完全一致")
     return 0
 
 

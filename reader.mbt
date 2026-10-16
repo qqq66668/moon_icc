@@ -21,6 +21,8 @@ pub suberror IccError {
   TagOutOfBounds(tag~ : String, offset~ : Int32, size~ : Int32)
   /// tag 表本身越界或条目数不合理。
   BadTagTable(count~ : Int32, offset~ : Int32)
+  /// tag 数据的内容不符合其类型要求。
+  BadTagData(tag~ : String, reason~ : String)
   /// 数值超出可表示范围（如标签数量过大）。
   OutOfRange(what~ : String, value~ : Int32)
 }
@@ -239,6 +241,8 @@ impl Show for IccError with fn output(self, logger) {
       logger.write(
         "IccError::BadTagTable(\{count} 个条目, 表偏移 \{offset})",
       )
+    BadTagData(tag~, reason~) =>
+      logger.write("IccError::BadTagData(tag \"\{tag}\": \{reason})")
     OutOfRange(what~, value~) =>
       logger.write("IccError::OutOfRange(\{what} = \{value})")
   }
