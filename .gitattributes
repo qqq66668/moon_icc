@@ -1,0 +1,8 @@
+# 统一换行符，避免 Windows 检出时的 CRLF 噪音影响格式检查与 diff
+* text=auto eol=lf
+*.mbt text eol=lf
+*.mbti text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
