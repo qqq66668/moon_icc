@@ -45,7 +45,10 @@ jobs:
       - name: 测试（js 后端）
         run: moon test --target js
 
-      # 用独立实现（Python struct）重新解析真实 profile，
-      # 与库的输出逐字段比对，证明解析结果不是"自己说自己对"
-      - name: 外部 oracle 差分
-        run: python3 tools/diff_oracle.py
+      # 用独立实现（Python struct）重新解析真实 profile 并重做 matrix/TRC 变换，
+      # 与库的输出逐字段、逐样本比对，证明结果不是"自己说自己对"
+      - name: 外部 oracle 差分（wasm-gc）
+        run: python3 tools/diff_oracle.py wasm-gc
+
+      - name: 外部 oracle 差分（js）
+        run: python3 tools/diff_oracle.py js
