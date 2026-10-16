@@ -101,6 +101,7 @@ link 1 10 0 3
 moon run cmd/main --target wasm-gc -- parse testdata/srgb.icc
 moon run cmd/main --target wasm-gc -- transform testdata/srgb.icc
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/display.icc
+moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
 ```
 
 `parse` 输出 profile 的头部与 tag 表：
@@ -140,8 +141,76 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | 逆变换（PCS XYZ → 设备 RGB）与矩阵求逆 | ✅ 已完成并验证 |
 | 多 profile 链接（源设备 → PCS → 目标设备） | ✅ 已完成并验证 |
 | 媒体相对比色意图 | ✅ 已完成并验证 |
-| 感知 / 饱和度 / 绝对比色意图 | 不做（依赖 profile 内 LUT，见下） |
-| CLUT 型 profile 变换（CMYK 打印机） | 计划中 |
+| CLUT 型 profile 变换（`mft1` / `mft2`，CMYK 打印机等） | ✅ 已完成并验证 |
+| 感知 / 饱和度 / 绝对比色意图 | 仅经 LUT tag 选取，不做 gamut mapping |
+| 把 LUT 型 profile 接入多 profile 链接 | 计划中 |
+| `mAB` / `mBA`（ICC v4 LUT） | 计划中 |
+
+## CLUT 型 profile 变换
+
+大量真实世界的 profile（印刷、CMYK、扫描仪）不是矩阵/TRC 型，而是把整个
+变换存在一张多维查找表里。本库支持 ICC v2 的两种 LUT 类型：
+
+| 类型 | 名称 | 表值位深 |
+|---|---|---|
+| `mft1` | lut8Type | 8 位（表固定 256 项） |
+| `mft2` | lut16Type | 16 位（表项数在文件里显式给出） |
+
+处理顺序：**输入表 → 矩阵（仅 3 输入通道时）→ CLUT（多线性插值）→ 输出表**。
+
+用法：
+
+```moonbit
+let profile = @moon_icc.Profile::parse(@fs.read_file_to_bytes("printer.icc"))
+// 设备值按 profile 输入色空间的通道顺序给出，0..1
+let lab = profile.device_to_lab(1, [ 0.0, 0.0, 0.0, 0.5 ])  // CMYK 50% 黑
+```
+
+命令行：
+
+```
+moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
+```
+
+### 实现中容易错的三处
+
+**（一）`mft2` 的字段顺序：矩阵在前，表项数在后。**
+
+矩阵在偏移 `12..47`（9 × s15Fixed16），输入/输出表项数在 `48..51`，
+表数据从 `52` 开始。本项目最初按"表项数在 12..15、矩阵在 16..51"实现，
+结果与该 tag 的声明长度差 2052 字节；改用正确顺序后
+`52 + 4×256×2 + 9⁴×3×2 + 3×2×2 = 41478`，与声明长度**精确相等**，
+且 12..47 处读到标准单位矩阵、48..51 处读到 256 与 2。
+
+**（二）ICC v2 的 Lab 编码上限是 `0xFF00`，不是 `0xFFFF`。**
+
+| 版本 | 位深 | L 满量程 | a/b 满量程 |
+|---|---|---|---|
+| v2 | 16 | `0xFF00` = 65280 | `0xFF00` |
+| v2 | 8 | `0xFF` = 255 | `0xFF` |
+| v4 | 16 | `0xFFFF` = 65535 | `0xFFFF` |
+
+因此解码要同时知道位深与版本。另有一个陷阱：**不能在折算之后把结果夹到
+1.0**——v2 的 profile 会合法地存到 `0xFFFF`（表示略高于 100 的 L）。
+本项目最初正是这样写的，网格节点判据立刻抓到：期望 100.387561，实得 100。
+
+**（三）意图到 tag 的映射：`A2B0`/`A2B1`/`A2B2` 是三个不同的表。**
+
+| 意图 | 编号 | 设备→PCS | PCS→设备 |
+|---|---|---|---|
+| 感知 | 0 | `A2B0` | `B2A0` |
+| 媒体相对比色 | 1 | `A2B1` | `B2A1` |
+| 饱和度 | 2 | `A2B2` | `B2A2` |
+
+本机 CMYK profile 的 A2B0 与 A2B1 逐字节比较有 **26539 处差异**，全在 CLUT 区。
+若把相对比色误接到 A2B0，暗端会差约 5 个 L 单位。
+
+**（四）输入表常常不是恒等，不能假定"节点索引/网格数"就落在节点上。**
+
+实测该 profile 通道 0 在 v=0.75 处表值为 49151，而恒等应为 49344。
+因此网格节点判据的输入必须**反解输入表**得到（见
+`tools/gen_clut_golden.py`），否则测到的是节点之间的插值结果，
+节点判据就失效了。
 
 ## 渲染意图：为什么只做媒体相对比色
 
@@ -233,10 +302,12 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 
 以下内容**不在**本项目范围内，写在此处以免误用：
 
-- **CLUT 型 profile 变换**（`mft1` / `mft2` / `mAB` / `mBA`）：当前版本能正确**解析**这类 profile，但不对其做变换——源或目标任一侧是 LUT 型时，`matrix_trc()` / `ColorTransform::new()` 会返回 `BadTagData` 明确报错，而不是静默给出错误颜色（测试覆盖了这条路径：CMYK 打印机 profile 必须显式失败）。
-- **感知 / 饱和度 / 绝对比色意图**：前两者依赖 profile 内 LUT，后者需要绝对白点亮度；理由见上文「渲染意图」一节。头部字段仍可正常解析读出。
+- **感知 / 饱和度 / 绝对比色意图的 gamut mapping**：LUT 型 profile 可按意图选取不同的 LUT tag（见上），但 matrix/TRC 型 profile 没有 LUT，无法做 gamut mapping；绝对比色所需的绝对白点亮度也不在 profile 内。详见上文「渲染意图」一节。
+- **`mAB` / `mBA`**（ICC v4 的 lutAToBType / lutBToAType）：当前的 LUT 支持只覆盖 v2 的 `mft1` / `mft2`；遇到 v4 LUT 类型会返回 `BadTagData` 明确报错。
+- **把 LUT 型 profile 接入多 profile 链接**：`ColorTransform` 目前只接受 matrix/TRC 型 profile（LUT 型会显式报错）。LUT 的解析与求值已独立可用（`device_to_lab`）。
+- **PCS 为 `XYZ ` 的 LUT 型 profile**：XYZ 的编码范围与 Lab 不同，尚未实现，会显式报错而非静默给出错误颜色。
 - **黑点补偿（BPC）**：不做。
-- **CMYK 输出**：依赖 CLUT，不在范围内。
+- **CMYK 输出到界面**：4 通道输出的求值已可用（`b2a`），但没有配套的图像/文件接口。
 - **图像文件读写**（PNG / JPEG / TIFF）：本库只处理色彩数值，不碰图像容器。
 - **软打样、色貌模型**：不做。
 
@@ -262,36 +333,42 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 38 项测试
+moon test --target wasm-gc     # 49 项测试
 moon test --target js          # 同一套测试，js 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
 ```
 
-判据分三层，独立性递增：
+判据分四层，独立性递增：
 
 1. **合成字节流**：精确构造每个字段，验证解析逻辑本身（含畸形输入）；
 2. **真实 profile**：用 Windows 系统自带的 3 个真实 profile，覆盖 matrix/TRC 型（sRGB）、真实显示器 profile、CMYK/LUT 型（打印机）；
-3. **外部 oracle**：两个来源——
+3. **外部 oracle**：三个来源——
    - `tools/diff_oracle.py`：Python `struct` **独立**按规范解析并**独立重做** matrix/TRC 变换，与本库逐字段、逐样本比对；
-   - `link_golden_wbtest.mbt`：lcms2 生成的 4096 个彩色样本金标（见上文交叉核对）。
+   - `link_golden_wbtest.mbt`：lcms2 生成的 4096 个彩色样本金标（见上文交叉核对）；
+   - `clut_golden_wbtest.mbt`：625 个 CLUT 网格节点 + 300 个 lcms2 CMYK 样本；
+4. **网格节点**：CLUT 节点值不依赖插值细节，任何正确实现在节点上都必须
+   返回存储值。这一层单独钉住**解析、索引步长、Lab 解码**。
 
 **实测结果**：
 
-- 差分对拍：3 个 profile × 15 个变换样本 × 3 个分量，**最大偏差 0.0（逐位一致）**，
-  wasm-gc 与 js 双后端相同。容差因此设为 `1e-15`——参考自身离散度为零，
-  就按紧值设，让结构性错误必然触发失败。
-- 与 lcms2 交叉核对：一致率 98.68%，判据见上文。
+- matrix/TRC 差分：3 个 profile × 15 个样本 × 3 个分量，**最大偏差 0.0（逐位一致）**，
+  wasm-gc 与 js 双后端相同。容差因此设为 `1e-15`。
+- 与 lcms2 交叉核对（链接）：一致率 98.68%，判据见上文。
+- CLUT 网格节点：625 个节点与独立解析的偏差 **< 1e-6**（金标精度上限）。
+- CLUT 对 lcms2：**最大偏差恰为 1 级**（8 位），无 2 级及以上；
+  L 通道平均有符号差 −0.11 级，即无系统性偏移。
 
 **判据验证**（主动植入 bug 确认判据是活的，不是空转）：
 
-| 植入的错误 | 单元测试反应 | 外部差分反应 |
-|---|---|---|
-| `renderingIntent` 读取位置错位 | 3 项变红 | 12 处不一致 |
-| TRC 与矩阵顺序颠倒 | 5 项变红（含中间调用例，白点偏离 D50 达 17.3 色差） | 变换样本全红 |
-| 矩阵求逆漏掉转置 | **5 项变红**（lcms2 一致率跌到 0%、恒等变换偏差 14 级、`M·M⁻¹` 偏差 0.49） | — |
+| 植入的错误 | 单元测试反应 |
+|---|---|
+| `renderingIntent` 读取位置错位 | 3 项变红，外部差分 12 处不一致 |
+| TRC 与矩阵顺序颠倒 | 5 项变红（白点偏离 D50 达 17.3 色差） |
+| 矩阵求逆漏掉转置 | 5 项变红（lcms2 一致率跌到 0%） |
+| CLUT 维度步长顺序写反 | **4 项变红**（节点偏差 91 个 L 单位，lcms2 差 93 级） |
 
-最后一条是开发中真实出现过的 bug：逆矩阵写成了转置，与 lcms2 在 8 位域上
+矩阵求逆那条是开发中真实出现过的 bug：逆矩阵写成了转置，与 lcms2 在 8 位域上
 最大差 **173/255**。**灰阶样本完全测不出它**（灰阶只走矩阵的对角路径），
 是 4096 个**彩色**样本把它抓出来的——这正是金标必须用彩色随机样本的原因。
 

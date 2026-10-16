@@ -110,10 +110,38 @@ fn read_and_link(source_path : String, dest_path : String) -> Unit raise {
 }
 
 ///|
+/// 打印 LUT 结构，并做一次 CMYK 的 K 轴扫描（CMYK 打印机 profile 用）。
+///
+/// 输出格式：先若干行 `a2b <字段> <值>` 描述 LUT，再每行
+/// `k <输入> <L> <a> <b>` 给出 CMYK=(0,0,0,k) 的 PCS Lab。
+fn describe_lut(path : String) -> Unit raise {
+  let profile = @moon_icc.Profile::parse(@fs.read_file_to_bytes(path))
+  println("class \{profile.header.device_class}")
+  println("colorspace \{profile.header.color_space}")
+  println("pcs \{profile.header.pcs}")
+  println(
+    "version \{profile.header.major_version}.\{profile.header.minor_version}",
+  )
+  let table = profile.a2b(1)
+  println("a2b_tag \{@moon_icc.intent_to_a2b_tag(1)}")
+  println("a2b_input_channels \{table.input_channels}")
+  println("a2b_output_channels \{table.output_channels}")
+  println("a2b_grid_points \{table.grid_points}")
+  println("a2b_bit_depth \{table.bit_depth}")
+  // K 轴扫描：纯黑墨从 0 到 100%
+  for i = 0; i <= 255; i = i + 17 {
+    let v = i.to_double() / 255.0
+    let lab = profile.device_to_lab(1, [0.0, 0.0, 0.0, v])
+    println("k \{i} \{lab.l} \{lab.a} \{lab.b}")
+  }
+}
+
+///|
 /// 入口：
 ///   `moon run cmd/main -- parse <profile 路径>`
 ///   `moon run cmd/main -- transform <profile 路径>`
 ///   `moon run cmd/main -- link <源 profile> <目标 profile>`
+///   `moon run cmd/main -- lut <LUT 型 profile 路径>`
 ///
 /// 参数按关键词扫描而非固定下标：不同后端下 `moon run` 传给程序的
 /// argv 形状不同（js 后端会把脚本路径放进 argv），
@@ -121,7 +149,7 @@ fn read_and_link(source_path : String, dest_path : String) -> Unit raise {
 fn main {
   let args = @env.args()
   let command_index = args.search_by(fn(a) {
-    a == "parse" || a == "transform" || a == "link"
+    a == "parse" || a == "transform" || a == "link" || a == "lut"
   })
   match command_index {
     None => {
@@ -129,6 +157,7 @@ fn main {
       println("  moon run cmd/main -- parse <icc-profile 路径>")
       println("  moon run cmd/main -- transform <icc-profile 路径>")
       println("  moon run cmd/main -- link <源 profile> <目标 profile>")
+      println("  moon run cmd/main -- lut <LUT 型 profile 路径>")
     }
     Some(i) => {
       let command = args[i]
@@ -150,6 +179,10 @@ fn main {
         "link" =>
           read_and_link(args[i + 1], args[i + 2]) catch {
             e => println("链接失败: \{e}")
+          }
+        "lut" =>
+          describe_lut(args[i + 1]) catch {
+            e => println("LUT 求值失败: \{e}")
           }
         _ => println("未知命令: \{command}")
       }
