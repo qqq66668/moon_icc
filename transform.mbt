@@ -475,34 +475,219 @@ fn bisect(c : ToneCurve, target : Double) -> Double {
 /// 两个 profile 的矩阵**已经**各自完成到 D50 的色适应，
 /// 因此这里在 PCS 中直接衔接，**不再**做额外的白点适应。
 pub struct ColorTransform {
-  /// 源 profile 的正变换。
-  source : MatrixTrcTransform
-  /// 目标 profile 的逆变换。
-  destination : InverseMatrixTrc
+  /// 源侧：设备 → PCS XYZ。
+  source : SourceStage
+  /// 目标侧：PCS XYZ → 设备。
+  destination : DestinationStage
+}
+
+///|
+/// 源侧（设备 → PCS）的两种实现。
+///
+/// LUT 分支存的是 **A2B** 表：输入设备值，输出 PCS Lab。
+enum SourceStage {
+  /// matrix/TRC 型：直接得到 PCS XYZ。
+  MatrixTrcSource(MatrixTrcTransform)
+  /// LUT 型：A2B 表输出 PCS Lab，需再转 XYZ 以统一中间表示。
+  /// 第二个参数表示该 profile 是否使用 ICC v2 的 PCS 编码。
+  LutSource(Clut, Bool)
+}
+
+///|
+/// 目标侧（PCS → 设备）的两种实现。
+///
+/// LUT 分支存的是 **B2A** 表：输入 PCS Lab，输出设备值。
+enum DestinationStage {
+  /// matrix/TRC 型：由 XYZ 求逆得到设备值。
+  MatrixTrcDest(InverseMatrixTrc)
+  /// LUT 型：由 XYZ 转 Lab 后查 B2A 表。
+  /// 第二个参数表示该 profile 是否使用 ICC v2 的 PCS 编码。
+  LutDest(Clut, Bool)
+}
+
+///|
+/// 该 profile 是否具备 matrix/TRC 变换所需的全部 tag。
+///
+/// 用于在构造链接时决定走哪条路径，而不必靠捕获异常来试探。
+pub fn Profile::has_matrix_trc(self : Profile) -> Bool {
+  let has = fn(sig : String) -> Bool {
+    match self.find_tag(sig) {
+      Some(_) => true
+      None => false
+    }
+  }
+  has("rXYZ") &&
+  has("gXYZ") &&
+  has("bXYZ") &&
+  has("rTRC") &&
+  has("gTRC") &&
+  has("bTRC")
+}
+
+///|
+/// 该 profile 是否具备 LUT 变换所需的 A2B tag。
+pub fn Profile::has_lut(self : Profile) -> Bool {
+  let has = fn(sig : String) -> Bool {
+    match self.find_tag(sig) {
+      Some(_) => true
+      None => false
+    }
+  }
+  has("A2B0") || has("A2B1") || has("A2B2")
+}
+
+///|
+/// 构造源侧。
+fn build_source(
+  profile : Profile,
+  intent : Int32,
+) -> SourceStage raise IccError {
+  if profile.has_matrix_trc() {
+    MatrixTrcSource(profile.matrix_trc())
+  } else if profile.has_lut() {
+    LutSource(profile.a2b(intent), profile.is_v2())
+  } else {
+    raise BadTagData(
+      tag="A2B0",
+      reason="profile 既没有 matrix/TRC tag，也没有 A2B LUT tag，无法做设备到 PCS 变换",
+    )
+  }
+}
+
+///|
+/// 构造目标侧。
+fn build_destination(
+  profile : Profile,
+  intent : Int32,
+) -> DestinationStage raise IccError {
+  if profile.has_matrix_trc() {
+    MatrixTrcDest(profile.matrix_trc().inverse())
+  } else if profile.has_lut() {
+    LutDest(profile.b2a(intent), profile.is_v2())
+  } else {
+    raise BadTagData(
+      tag="B2A0",
+      reason="profile 既没有 matrix/TRC tag，也没有 B2A LUT tag，无法做 PCS 到设备变换",
+    )
+  }
 }
 
 ///|
 /// 构造源→目标的端到端变换。
 ///
-/// 两侧都必须是 matrix/TRC 型 profile；任一侧为 LUT 型时报错。
+/// 两侧各自可以是 matrix/TRC 型或 LUT 型，四种组合都支持：
+/// 中间统一用 PCS XYZ 衔接。因此 sRGB → CMYK 打印机这样的跨类型链接可用。
+///
+/// 渲染意图固定为媒体相对比色（编号 1），理由见上文。
 pub fn ColorTransform::new(
   source : Profile,
   destination : Profile,
 ) -> ColorTransform raise IccError {
+  let intent = 1
   {
-    source: source.matrix_trc(),
-    destination: destination.matrix_trc().inverse(),
+    source: build_source(source, intent),
+    destination: build_destination(destination, intent),
   }
 }
 
 ///|
-/// 端到端变换求值。
+/// 源侧通道数（目标色空间的通道数由 profile 决定，如 CMYK 为 4）。
+pub fn ColorTransform::source_channels(self : ColorTransform) -> Int32 {
+  match self.source {
+    MatrixTrcSource(_) => 3
+    LutSource(table, _) => table.input_channels
+  }
+}
+
+///|
+/// 目标侧通道数。
+pub fn ColorTransform::destination_channels(self : ColorTransform) -> Int32 {
+  match self.destination {
+    MatrixTrcDest(_) => 3
+    LutDest(table, _) => table.output_channels
+  }
+}
+
+///|
+/// 设备值 → PCS XYZ。
+///
+/// matrix/TRC 型直接得到 XYZ；LUT 型先得到 Lab 再转 XYZ，
+/// 使中间表示统一，从而两类 profile 可以任意组合。
+fn SourceStage::to_pcs(self : SourceStage, inputs : Array[Double]) -> XyzNumber {
+  match self {
+    MatrixTrcSource(t) =>
+      t.to_pcs(
+        if inputs.length() > 0 {
+          inputs[0]
+        } else {
+          0.0
+        },
+        if inputs.length() > 1 {
+          inputs[1]
+        } else {
+          0.0
+        },
+        if inputs.length() > 2 {
+          inputs[2]
+        } else {
+          0.0
+        },
+      )
+    LutSource(table, is_v2) => {
+      let raw = table.evaluate(inputs)
+      lab_to_xyz(clut_output_to_lab(raw, table.bit_depth, is_v2))
+    }
+  }
+}
+
+///|
+/// PCS XYZ → 设备值。
+fn DestinationStage::from_pcs(
+  self : DestinationStage,
+  xyz : XyzNumber,
+) -> Array[Double] {
+  match self {
+    MatrixTrcDest(inv) => {
+      let (r, g, b) = inv.from_pcs(xyz)
+      [r, g, b]
+    }
+    LutDest(table, is_v2) => {
+      let encoded = lab_to_clut_input(xyz_to_lab(xyz), table.bit_depth, is_v2)
+      table.evaluate(encoded)
+    }
+  }
+}
+
+///|
+/// 端到端变换求值（通用形式，支持任意通道数）。
+///
+/// 输入按**源 profile 色空间**的通道顺序给出，输出按**目标 profile 色空间**
+/// 的通道顺序。例如 sRGB → CMYK 时输入 3 个值、输出 4 个值。
+pub fn ColorTransform::transform_values(
+  self : ColorTransform,
+  inputs : Array[Double],
+) -> Array[Double] {
+  self.destination.from_pcs(self.source.to_pcs(inputs))
+}
+
+///|
+/// 端到端变换求值（3 通道便捷形式）。
+///
+/// 仅用于源与目标都是 3 通道的情形（如 sRGB → 显示器）。跨类型或 CMYK
+/// 场景请用 `transform_values`。
 pub fn ColorTransform::transform(
   self : ColorTransform,
   r : Double,
   g : Double,
   b : Double,
 ) -> (Double, Double, Double) {
-  let xyz = self.source.to_pcs(r, g, b)
-  self.destination.from_pcs(xyz)
+  let out = self.transform_values([r, g, b])
+  let get = fn(i : Int32) -> Double {
+    if i < out.length() {
+      out[i]
+    } else {
+      0.0
+    }
+  }
+  (get(0), get(1), get(2))
 }
