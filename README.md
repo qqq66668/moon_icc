@@ -6,9 +6,11 @@
 
 ![演示预览](demo/preview.png)
 
-▶ **[演示视频（39 秒，1280×720）](demo/moon_icc-demo.mp4)** —
-视频里的每一行都是当场运行 `moon run cmd/main` 四个子命令的真实输出，
-不是摆拍。可用 `python tools/make_demo_video.py` 重新生成。
+▶ **[演示视频（60 秒，1280×720）](demo/moon_icc-demo.mp4)** —
+七个场景依次运行 `parse` / `transform` / `link` / `lut` 子命令，
+覆盖 matrix/TRC 变换、跨类型链接、v2 的 `mft2`、v4 的 `mAB`/`mBA`、
+以及 PCS 为 `XYZ ` 的 LUT。视频里的每一行都是当场跑出来的，不是摆拍；
+可用 `python tools/make_demo_video.py` 重新生成。
 
 ## 这个库解决什么问题
 
