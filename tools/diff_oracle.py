@@ -15,7 +15,13 @@ import os
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-PROFILES = ["srgb.icc", "display.icc", "cmyk_printer.icc", "test4.icc"]
+PROFILES = [
+    "srgb.icc",
+    "display.icc",
+    "cmyk_printer.icc",
+    "test4.icc",
+    "xyz_lut.icc",
+]
 
 # 变换对拍的绝对容差。
 #
@@ -241,22 +247,26 @@ def lut_with_moonbit(path, target):
 def compare_v4_structure(name, py, mb):
     """把 Python 独立解析的 v4 结构与库的 lut 输出比对。
 
-    CLI 的 `lut` 子命令打印的是 **intent=1** 的表，即 `A2B1` / `B2A1`。
+    CLI 的 `lut` 子命令打印的是 **intent=1** 的表：有 `A2B1`/`B2A1` 时用它，
+    否则按库的回退规则落到 `A2B0`/`B2A0`（`xyz_lut.icc` 就是这种情况）。
     """
     diffs = []
-    for tag, key in (("A2B1", "a2b"), ("B2A1", "b2a")):
-        if tag not in py:
-            diffs.append(f"  Python 未找到 {tag}")
+    for candidates, key in ((("A2B1", "A2B0"), "a2b"), (("B2A1", "B2A0"), "b2a")):
+        tag = next((t for t in candidates if t in py), None)
+        if tag is None:
+            diffs.append(f"  Python 未找到 {candidates[0]}/{candidates[1]}")
             continue
         info = py[tag]
+        if info["grid"] is None:
+            grid_text = "无 CLUT"
+        else:
+            grid_text = "x".join(str(g) for g in info["grid"])
         want = {
             f"{key}_type": info["type"],
             f"{key}_input_channels": str(info["ic"]),
             f"{key}_output_channels": str(info["oc"]),
-            f"{key}_grid_points": "x".join(str(g) for g in (info["grid"] or [])),
+            f"{key}_grid_points": grid_text,
         }
-        if info["grid"] is None:
-            want[f"{key}_grid_points"] = "无 CLUT"
         for k, v in want.items():
             if mb.get(k) != v:
                 diffs.append(f"  {k}: python={v!r} moonbit={mb.get(k)!r}")
@@ -466,7 +476,9 @@ def main():
                 for line in v4_diffs:
                     print(line)
             else:
-                for tag in ("A2B1", "B2A1"):
+                for tag in ("A2B1", "A2B0", "B2A1", "B2A0"):
+                    if tag not in py_v4:
+                        continue
                     info = py_v4[tag]
                     curves = "/".join(
                         f"{k}{len(v)}" for k, v in info["curves"].items()

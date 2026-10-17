@@ -330,11 +330,22 @@ fn curve_segment_len(
 /// 夹紧是必要的：lcms2 的 16 位定点管线在每一级之后都把值限制在
 /// [0,65535]。实测 `mBA` 的 M 曲线在超色域输入下会算出负值，
 /// 不夹紧会与参考实现出现数十级的偏差。
+///
+/// **曲线集缺省（长度为 0）时必须原样透传**，不能返回空数组——
+/// `mAB `/`mBA ` 的 A/M/B 三段都可以缺省，中间某一级缺省时若把数组清空，
+/// 后续阶段就拿不到通道值（本项目真实踩到：一个只有 A 曲线 + CLUT 的
+/// 合成 profile 在最大输入处整体输出 0）。
 fn apply_curve_set(
   curves : Array[ToneCurve],
   values : Array[Double],
 ) -> Array[Double] {
   let out : Array[Double] = []
+  if curves.length() == 0 {
+    for v in values {
+      out.push(v)
+    }
+    return out
+  }
   for i = 0; i < curves.length(); i = i + 1 {
     let v = if i < values.length() { values[i] } else { 0.0 }
     out.push(clamp01(curves[i].evaluate(v)))
@@ -654,14 +665,15 @@ pub fn LutTable::output_channels(self : LutTable) -> Int32 {
 }
 
 ///|
-/// 表值位深（`clut_output_to_lab` 需要）。
+/// 表值位深（`clut_output_to_lab` / `clut_output_to_xyz` 需要）。
 ///
-/// v4 的 `mAB `/`mBA ` 一律按 16 位满量程解释：v4 的 Lab 编码上限就是 `0xFFFF`，
-/// 与 CLUT 表值本身是 8 位还是 16 位无关（表值已归一化到 [0,1]）。
+/// v2 的 `mft1`/`mft2` 由类型决定（8 / 16 位）；
+/// v4 的 `mAB `/`mBA ` 由 CLUT 段的精度字节决定（1 字节 → 8 位，2 字节 → 16 位），
+/// 因为这个位深同时决定 **XYZ PCS 的折算系数**（8 位满量程是 128，16 位是 32768）。
 pub fn LutTable::bit_depth(self : LutTable) -> Int32 {
   match self {
     LutV2(c) => c.bit_depth
-    LutV4(_) => 16
+    LutV4(v) => if v.precision == 1 { 8 } else { 16 }
   }
 }
 

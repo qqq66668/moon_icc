@@ -393,6 +393,45 @@ pub fn lab_to_clut_input(
 }
 
 ///|
+/// 把 CLUT 的输出（归一化到 [0,1]）解码为 PCS XYZ。
+///
+/// **XYZ 的 PCS 编码是 `u1Fixed15Number`：1.0 = `0x8000`，上限约 1.99997**
+/// （`0xFFFF` 表示 1 + 32767/32768），且 **v2 与 v4 相同**——
+/// 这一点与 Lab 不同（Lab 的 v2/v4 上限分别是 `0xFF00` 与 `0xFFFF`）。
+///
+/// 因此 16 位表值要乘 `65535/32768`，8 位表值要乘 `255/128`。
+/// 实测依据：用一个合成的 XYZ-PCS LUT profile（`testdata/xyz_lut.icc`，
+/// 节点值 `(i,j,k)×32768`）与 lcms2 对拍，输出恰为 `device/1.99997…`，
+/// 逐点偏差 0 级；若误按满量程 `0xFFFF` 解释，结果会整体差 2 倍。
+pub fn clut_output_to_xyz(
+  values : Array[Double],
+  bit_depth : Int32,
+) -> XyzNumber {
+  let scale = fn(v : Double) -> Double {
+    let f = clamp01(v)
+    if bit_depth == 8 {
+      f * 255.0 / 128.0
+    } else {
+      f * 65535.0 / 32768.0
+    }
+  }
+  { x: scale(values[0]), y: scale(values[1]), z: scale(values[2]), }
+}
+
+///|
+/// 把 PCS XYZ 编码到 CLUT 输入域（`clut_output_to_xyz` 的逆）。
+pub fn xyz_to_clut_input(xyz : XyzNumber, bit_depth : Int32) -> Array[Double] {
+  let unscale = fn(v : Double) -> Double {
+    if bit_depth == 8 {
+      clamp01(v * 128.0 / 255.0)
+    } else {
+      clamp01(v * 32768.0 / 65535.0)
+    }
+  }
+  [unscale(xyz.x), unscale(xyz.y), unscale(xyz.z)]
+}
+
+///|
 /// 该 profile 是否使用 ICC v2 的 PCS 编码。
 ///
 /// ICC 的版本从 2 直接跳到 4，没有 v3。因此主版本号 <= 2 即视为 v2。
@@ -478,26 +517,66 @@ pub fn Profile::b2a(self : Profile, intent : Int32) -> LutTable raise IccError {
 }
 
 ///|
+/// 设备值（0..1，按 profile 输入色空间的通道顺序）→ PCS XYZ。
+///
+/// LUT 型 profile 的 PCS 可以是 `Lab ` 或 `XYZ `，两者的编码不同：
+/// Lab 按版本折算（v2 上限 `0xFF00`），XYZ 一律是 `u1Fixed15Number`
+/// （1.0 = `0x8000`）。见 `clut_output_to_lab` 与 `clut_output_to_xyz`。
+pub fn Profile::device_to_xyz(
+  self : Profile,
+  intent : Int32,
+  inputs : Array[Double],
+) -> XyzNumber raise IccError {
+  let table = self.a2b(intent)
+  let raw = table.evaluate(inputs)
+  if self.header.pcs == "XYZ " {
+    clut_output_to_xyz(raw, table.bit_depth())
+  } else if self.header.pcs == "Lab " {
+    lab_to_xyz(
+      clut_output_to_lab(raw, table.bit_depth(), table.pcs_is_v2(self.is_v2())),
+    )
+  } else {
+    raise BadTagData(
+      tag="pcs",
+      reason="LUT 变换只支持 PCS 为 \"Lab \" 或 \"XYZ \"，实际 \"\{self.header.pcs}\"",
+    )
+  }
+}
+
+///|
+/// PCS XYZ → 设备值（`device_to_xyz` 的逆方向）。
+pub fn Profile::xyz_to_device(
+  self : Profile,
+  intent : Int32,
+  xyz : XyzNumber,
+) -> Array[Double] raise IccError {
+  let table = self.b2a(intent)
+  let encoded = if self.header.pcs == "XYZ " {
+    xyz_to_clut_input(xyz, table.bit_depth())
+  } else if self.header.pcs == "Lab " {
+    lab_to_clut_input(
+      xyz_to_lab(xyz),
+      table.bit_depth(),
+      table.pcs_is_v2(self.is_v2()),
+    )
+  } else {
+    raise BadTagData(
+      tag="pcs",
+      reason="LUT 变换只支持 PCS 为 \"Lab \" 或 \"XYZ \"，实际 \"\{self.header.pcs}\"",
+    )
+  }
+  table.evaluate(encoded)
+}
+
+///|
 /// 设备值（0..1，按 profile 输入色空间的通道顺序）→ PCS Lab。
 ///
-/// 这是 CLUT 型 profile 的 A2B 方向的完整求值：先在 CLUT 上求值，
-/// 再按 profile 版本解码 Lab。
-///
-/// 仅支持 PCS 为 `Lab ` 的 profile。PCS 为 `XYZ ` 的 LUT 型 profile
-/// 需要另一套解码（XYZ 的编码范围与 Lab 不同），当前版本显式报错，
-/// 不静默给出错误颜色。
+/// PCS 为 `XYZ ` 的 LUT 型 profile 会先求出 PCS XYZ 再转 Lab
+/// （这一步是精确的坐标换算，不引入近似）。
 pub fn Profile::device_to_lab(
   self : Profile,
   intent : Int32,
   inputs : Array[Double],
 ) -> Lab raise IccError {
-  if self.header.pcs != "Lab " {
-    raise BadTagData(
-      tag="pcs",
-      reason="LUT 解码当前只支持 PCS 为 \"Lab \" 的 profile，实际 \"\{self.header.pcs}\"",
-    )
-  }
-  let table = self.a2b(intent)
-  let raw = table.evaluate(inputs)
-  clut_output_to_lab(raw, table.bit_depth(), table.pcs_is_v2(self.is_v2()))
+  xyz_to_lab(self.device_to_xyz(intent, inputs))
 }

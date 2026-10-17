@@ -55,11 +55,17 @@ SAMPLES = FIXED + RANDOM
 
 
 def run_fwd(intent, samples):
-    """RGB -> LAB（A2B 方向）。"""
+    """RGB -> LAB（A2B 方向）。
+
+    带 NOOPTIMIZE：lcms2 默认会把管线重采样成近似 CLUT，
+    金标应当取它的精确路径（这一点在 XYZ-PCS 的合成样本上尤其明显）。
+    """
     prof = ImageCms.getOpenProfile(ICC)
     lab = ImageCms.createProfile("LAB", 5000.0)
-    tr = ImageCms.buildTransform(prof, lab, "RGB", "LAB",
-                                 renderingIntent=intent, flags=0)
+    tr = ImageCms.buildTransform(
+        prof, lab, "RGB", "LAB",
+        renderingIntent=intent, flags=NOOPTIMIZE | NOCACHE,
+    )
     im = Image.new("RGB", (len(samples), 1))
     im.putdata(samples)
     out = ImageCms.applyTransform(im, tr)
