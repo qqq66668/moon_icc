@@ -159,10 +159,19 @@ fn describe_lut(path : String) -> Unit raise {
   )
   let table = profile.a2b(1)
   println("a2b_tag \{@moon_icc.intent_to_a2b_tag(1)}")
-  println("a2b_input_channels \{table.input_channels}")
-  println("a2b_output_channels \{table.output_channels}")
-  println("a2b_grid_points \{table.grid_points}")
-  println("a2b_bit_depth \{table.bit_depth}")
+  println("a2b_type \{table.type_name()}")
+  println("a2b_input_channels \{table.input_channels()}")
+  println("a2b_output_channels \{table.output_channels()}")
+  println("a2b_grid_points \{table.grid_text()}")
+  println("a2b_bit_depth \{table.bit_depth()}")
+  // PCS → 设备方向的结构（供外部 oracle 差分比对，见 tools/diff_oracle.py）
+  let back = profile.b2a(1)
+  println("b2a_tag \{@moon_icc.intent_to_b2a_tag(1)}")
+  println("b2a_type \{back.type_name()}")
+  println("b2a_input_channels \{back.input_channels()}")
+  println("b2a_output_channels \{back.output_channels()}")
+  println("b2a_grid_points \{back.grid_text()}")
+  println("b2a_bit_depth \{back.bit_depth()}")
   // K 轴扫描：纯黑墨从 0 到 100%
   for i = 0; i <= 255; i = i + 17 {
     let v = i.to_double() / 255.0

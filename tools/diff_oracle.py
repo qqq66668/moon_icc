@@ -15,7 +15,7 @@ import os
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-PROFILES = ["srgb.icc", "display.icc", "cmyk_printer.icc"]
+PROFILES = ["srgb.icc", "display.icc", "cmyk_printer.icc", "test4.icc"]
 
 # 变换对拍的绝对容差。
 #
@@ -119,6 +119,148 @@ def parse_with_moonbit(path, target):
             if len(parts) == 3:
                 out["tags"].append((parts[0], int(parts[1]), int(parts[2])))
     return out
+
+
+def parse_v4_lut_with_python(path):
+    """独立解析 ICC v4 的 `mAB ` / `mBA ` tag 结构。
+
+    与库的实现完全独立：只按 ICC.1 的字段布局读字节，并按**段长度自洽**
+    做校验（每段都必须落在 tag 范围内，CLUT 的字节数必须等于
+    网格点数乘积 × 输出通道数 × 精度）。
+
+    返回 {tag: {...}}；没有 v4 LUT tag 时返回空字典。
+    """
+    with open(path, "rb") as f:
+        d = f.read()
+
+    n = struct.unpack(">I", d[128:132])[0]
+    tags = {}
+    for i in range(n):
+        o = 132 + i * 12
+        sig = d[o : o + 4].decode("latin1")
+        off, sz = struct.unpack(">II", d[o + 4 : o + 12])
+        tags[sig] = (off, sz)
+
+    result = {}
+    for tag in ("A2B0", "A2B1", "B2A0", "B2A1"):
+        if tag not in tags:
+            continue
+        base, size = tags[tag]
+        ttype = d[base : base + 4].decode("latin1")
+        if ttype not in ("mAB ", "mBA "):
+            continue
+        ic, oc = d[base + 8], d[base + 9]
+        o_b, o_mat, o_m, o_c, o_a = struct.unpack(">5I", d[base + 12 : base + 32])
+        tag_end = base + size
+
+        def read_curves(off, count):
+            """按类型从内容推算段长（内嵌曲线**没有**长度字段）。"""
+            if off == 0:
+                return []
+            p = base + off
+            out = []
+            for _ in range(count):
+                sig = d[p : p + 4].decode("latin1")
+                if sig == "curv":
+                    cnt = struct.unpack(">I", d[p + 8 : p + 12])[0]
+                    step = 12 if cnt == 0 else (14 if cnt == 1 else 12 + 2 * cnt)
+                    out.append(("curv", cnt))
+                elif sig == "para":
+                    ft = struct.unpack(">H", d[p + 8 : p + 10])[0]
+                    npar = (1, 3, 4, 5, 7)[ft]
+                    step = 12 + 4 * npar
+                    out.append(("para", ft, npar))
+                else:
+                    raise SystemExit(f"{tag}: 内嵌曲线类型 {sig!r} 无法解析")
+                if p + step > tag_end:
+                    raise SystemExit(f"{tag}: 曲线段越出 tag 范围")
+                p = (p + step + 3) // 4 * 4
+            return out
+
+        if ttype == "mAB ":
+            # 设备 → PCS：A 用输入通道数，M/B 用输出通道数
+            a_cnt, m_cnt, b_cnt = ic, oc, oc
+        else:
+            # PCS → 设备：B/M 用输入通道数，A 用输出通道数
+            b_cnt, m_cnt, a_cnt = ic, ic, oc
+
+        curves = {
+            "A": read_curves(o_a, a_cnt),
+            "M": read_curves(o_m, m_cnt),
+            "B": read_curves(o_b, b_cnt),
+        }
+
+        matrix = None
+        if o_mat:
+            if base + o_mat + 48 > tag_end:
+                raise SystemExit(f"{tag}: 矩阵段越出 tag 范围")
+            matrix = struct.unpack(">12i", d[base + o_mat : base + o_mat + 48])
+
+        grid = prec = nodes = None
+        if o_c:
+            cp = base + o_c
+            grid = list(d[cp : cp + ic])
+            prec = d[cp + 16]
+            npts = 1
+            for g in grid:
+                npts *= g
+            nodes = npts * oc
+            if cp + 20 + nodes * prec > tag_end:
+                raise SystemExit(f"{tag}: CLUT 段越出 tag 范围")
+        result[tag] = {
+            "type": ttype,
+            "ic": ic,
+            "oc": oc,
+            "grid": grid,
+            "prec": prec,
+            "nodes": nodes,
+            "curves": curves,
+            "matrix": matrix,
+        }
+    return result
+
+
+def lut_with_moonbit(path, target):
+    """跑 CLI 的 lut 子命令，取出 a2b_* / b2a_* 结构字段。"""
+    cmd = ["moon", "run", "cmd/main", "--target", target, "--", "lut", path]
+    r = subprocess.run(
+        cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=300
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"MoonBit CLI 退出码 {r.returncode}\n{r.stdout}\n{r.stderr}")
+    out = {}
+    for line in r.stdout.splitlines():
+        line = line.rstrip("\r")
+        for prefix in ("a2b_", "b2a_"):
+            if line.startswith(prefix):
+                key, _, value = line.partition(" ")
+                out[key] = value
+    return out
+
+
+def compare_v4_structure(name, py, mb):
+    """把 Python 独立解析的 v4 结构与库的 lut 输出比对。
+
+    CLI 的 `lut` 子命令打印的是 **intent=1** 的表，即 `A2B1` / `B2A1`。
+    """
+    diffs = []
+    for tag, key in (("A2B1", "a2b"), ("B2A1", "b2a")):
+        if tag not in py:
+            diffs.append(f"  Python 未找到 {tag}")
+            continue
+        info = py[tag]
+        want = {
+            f"{key}_type": info["type"],
+            f"{key}_input_channels": str(info["ic"]),
+            f"{key}_output_channels": str(info["oc"]),
+            f"{key}_grid_points": "x".join(str(g) for g in (info["grid"] or [])),
+        }
+        if info["grid"] is None:
+            want[f"{key}_grid_points"] = "无 CLUT"
+        for k, v in want.items():
+            if mb.get(k) != v:
+                diffs.append(f"  {k}: python={v!r} moonbit={mb.get(k)!r}")
+    return diffs
 
 
 def compare(name, py, mb):
@@ -312,6 +454,34 @@ def main():
             print(
                 f"[一致] {name}: 头部 9 个字段 + {py['tagcount']} 个 tag 条目全部吻合"
             )
+
+        # ---- 功能 4：v4 LUT（mAB / mBA）结构对拍 ----
+        py_v4 = parse_v4_lut_with_python(path)
+        if py_v4:
+            mb_lut = lut_with_moonbit(path, target)
+            v4_diffs = compare_v4_structure(name, py_v4, mb_lut)
+            if v4_diffs:
+                total_diffs += len(v4_diffs)
+                print(f"[v4 结构不一致] {name}")
+                for line in v4_diffs:
+                    print(line)
+            else:
+                for tag in ("A2B1", "B2A1"):
+                    info = py_v4[tag]
+                    curves = "/".join(
+                        f"{k}{len(v)}" for k, v in info["curves"].items()
+                    )
+                    grid = (
+                        "无 CLUT"
+                        if info["grid"] is None
+                        else "x".join(str(g) for g in info["grid"])
+                    )
+                    print(
+                        f"[v4 结构一致] {name} {tag}: {info['type']} "
+                        f"{info['ic']}→{info['oc']} 网格 {grid} "
+                        f"精度 {info['prec']} 曲线 {curves} "
+                        f"矩阵项 {len(info['matrix']) if info['matrix'] else 0}"
+                    )
 
         # ---- 功能 2：matrix/TRC 变换对拍 ----
         py_t = transform_with_python(path)

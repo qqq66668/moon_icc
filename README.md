@@ -143,6 +143,7 @@ moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/display.ic
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc saturation
 moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
+moon run cmd/main --target wasm-gc -- lut testdata/test4.icc
 ```
 
 `parse` 输出 profile 的头部与 tag 表：
@@ -186,7 +187,7 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | 跨类型链接（matrix/TRC ↔ LUT 任意组合） | ✅ 已完成并验证 |
 | 渲染意图：感知 / 媒体相对比色 / 饱和度 | ✅ 已完成并验证 |
 | 渲染意图：绝对比色 | **已知限制**，见下文（与相对比色相同路径） |
-| `mAB` / `mBA`（ICC v4 LUT） | 计划中 |
+| `mAB` / `mBA`（ICC v4 LUT） | ✅ 已完成并验证 |
 | PCS 为 `XYZ ` 的 LUT 型 profile | 计划中 |
 
 ## CLUT 型 profile 变换
@@ -255,6 +256,78 @@ moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
 `tools/gen_clut_golden.py`），否则测到的是节点之间的插值结果，
 节点判据就失效了。
 
+## ICC v4 的 LUT（`mAB ` / `mBA `）
+
+ICC v4 把 LUT 换成了两种新类型，分段更灵活：
+
+| 类型 | 名称 | 方向 |
+|---|---|---|
+| `mAB ` | lutAToBType | 设备 → PCS |
+| `mBA ` | lutBToAType | PCS → 设备 |
+
+每一段都可以缺省（偏移为 0），处理顺序由方向决定：
+
+```
+mAB：A 曲线 → CLUT → M 曲线 → 矩阵 → B 曲线
+mBA：B 曲线 → 矩阵 → M 曲线 → CLUT → A 曲线
+```
+
+两处与 `mft1`/`mft2` 差别很大、**照直觉写就会错**的地方：
+
+**（一）矩阵段没有类型签名头。** 偏移直接指向 9 个 `s15Fixed16`
+矩阵项，紧跟 3 个 `s15Fixed16` 偏移项，共 48 字节。
+而曲线段**是有**类型签名的——两者不一致。本项目初期按"先跳 8 字节类型头"
+读矩阵，结果把 M 段的 `para` 签名当成了矩阵偏移项（读出的"偏移"约
+28769.44，正是 `'para'` 四个字节被当成定点数的结果），与参考实现的最大偏差
+达到 10 级。
+
+**（二）内嵌曲线段没有长度字段。** 类型签名之后的 4 字节是**保留位**，
+不是长度；段长只能按类型从内容推算，再补齐到 4 字节边界：
+
+| 类型 | 内容 | 长度 |
+|---|---|---|
+| `curv` 项数 0 | 恒等 | 8 + 4 |
+| `curv` 项数 1 | 单个 gamma | 8 + 4 + 2 |
+| `curv` 项数 n>1 | 查找表 | 8 + 4 + 2n |
+| `para` | 函数类型 + 参数 | 8 + 4 + 4×(1/3/4/5/7) |
+
+对拍样本的曲线段保留位恰好全为 0；若当成长度读，会原地打转或读错位。
+
+**（三）两个方向的插值方式不同。** 参考实现的 3 输入 CLUT 默认用
+**四面体**插值，但在 `PCS` 为 `Lab ` 的**输出** LUT 上会改回**三线性**
+（lcms2 `cmsio1.c` 的 `_cmsReadOutputLUT`，源码注释称此处为
+"controversial stuff"）。本库照此实现，并用实测确认了它是对的：
+
+| 插值选择 | 与 lcms2 的一致率（40 样本） |
+|---|---|
+| `mAB ` 四面体 + `mBA ` 三线性（本库） | 见下表 |
+| 两者对调 | 2 项测试变红，A2B0 差 3 级、B2A0 差 4 级 |
+
+**（四）逐级夹紧。** 参考实现的 16 位定点管线在每一级之后把值限制在
+`[0, 65535]`。`mBA` 的 M 曲线在超色域输入下会算出负值，不夹紧会与参考实现
+差出数十级。
+
+### 实测（`testdata/test4.icc`，40 个样本，8 位域）
+
+| tag | 方向 | 完全一致 | 差 1 级 | 最大偏差 |
+|---|---|---|---|---|
+| `A2B0` | 设备 → PCS | **40/40** | 0 | **0 级** |
+| `A2B1` | 设备 → PCS | 39/40 | 1 | 1 级 |
+| `B2A0` | PCS → 设备 | 38/40 | 2 | 1 级 |
+| `B2A1` | PCS → 设备 | 39/40 | 1 | 1 级 |
+
+判据还包含一层**不依赖插值**的节点检查：`A2B0` 的曲线与矩阵全为恒等，
+因此其输出必须精确等于 CLUT 节点值；节点值由测试**直接读原始字节**得到
+（用独立分析得出的偏移），不经过库的解析代码。
+
+### 关于 B2A 的对拍口径
+
+PCS → 设备方向**不能**用 `LAB` 模式输入直接对拍：实测参考实现的 8 位 Lab
+输入格式器会给送进 CLUT 的坐标加一个偏移（用一个"CLUT 恒等、曲线恒等"的
+探针 profile 反解坐标，`L8=1` 时坐标是 0.0353 而非 0.0039，即近黑处抬高约
+8/255）。因此金标改用 **`RGB → RGB` 组合变换**（内部先 A2B 再 B2A），
+避开该格式器，否则会把参考实现的行为记成本库的误差。
+
 ## 与 lcms2 的交叉核对（重要）
 
 端到端链接结果与 **lcms2**（业界标准 CMM，经 Pillow 的 `ImageCms` 调用）
@@ -302,6 +375,7 @@ python tools/gen_golden.py             # 生成链接金标（lcms2 NOOPTIMIZE�
 python tools/gen_clut_golden.py        # 生成 CLUT 金标（网格节点 + lcms2）
 python tools/gen_cross_link_golden.py  # 生成跨类型链接金标
 python tools/gen_intent_golden.py      # 生成四种渲染意图金标
+python tools/gen_v4lut_golden.py       # 生成 ICC v4 LUT（mAB/mBA）金标
 python tools/lcms2_flags_check.py      # 复现 flags 对比表
 python tools/lcms2_deviation_report.py # 复现链接偏差分布表
 python tools/lcms2_intent_check.py     # 复现"哪些 profile 能区分意图"
@@ -380,7 +454,6 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 
 - **绝对比色的白点缩放**：编号 3 当前与媒体相对比色（编号 1）相同。本项目按标准形式实现过白点缩放，但实测与 lcms2 的偏差从 20 级恶化到 107 级，说明该形式与参考实现的语义不符；在无法确定参考语义前不发布猜测实现。详见上文「渲染意图」。
 - **感知 / 饱和度意图的 gamut mapping**：本库通过选取 `A2B0`/`A2B2` 表来体现意图，与 lcms2 在这两种意图下交叉核对通过；但不自行做色域映射（映射规则由 profile 内的 LUT 承载）。
-- **`mAB` / `mBA`**（ICC v4 的 lutAToBType / lutBToAType）：当前的 LUT 支持只覆盖 v2 的 `mft1` / `mft2`；遇到 v4 LUT 类型会返回 `BadTagData` 明确报错。
 - **PCS 为 `XYZ ` 的 LUT 型 profile**：XYZ 的编码范围与 Lab 不同，尚未实现，会显式报错而非静默给出错误颜色。
 - **黑点补偿（BPC）**：不做。
 - **图像文件读写**（PNG / JPEG / TIFF）：本库只处理色彩数值，不碰图像容器。4 通道（CMYK）的求值本身已可用。
@@ -408,8 +481,9 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 63 项测试
+moon test --target wasm-gc     # 73 项测试
 moon test --target js          # 同一套测试，js 后端
+moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
 ```
@@ -417,15 +491,19 @@ python tools/diff_oracle.py js         # 同上，js 后端
 判据分四层，独立性递增：
 
 1. **合成字节流**：精确构造每个字段，验证解析逻辑本身（含畸形输入）；
-2. **真实 profile**：用 Windows 系统自带的 3 个真实 profile，覆盖 matrix/TRC 型（sRGB）、真实显示器 profile、CMYK/LUT 型（打印机）；
-3. **外部 oracle**：五个来源——
-   - `tools/diff_oracle.py`：Python `struct` **独立**按规范解析并**独立重做** matrix/TRC 变换，与本库逐字段、逐样本比对；
+2. **真实 profile**：Windows 系统自带的 3 个真实 profile（matrix/TRC 型 sRGB、
+   真实显示器、CMYK/LUT 打印机），外加 Little-CMS 测试套件里的 ICC v4 profile
+   `test4.icc`（覆盖 `mAB ` / `mBA `，来源与许可见 `testdata/README.md`）；
+3. **外部 oracle**：六个来源——
+   - `tools/diff_oracle.py`：Python `struct` **独立**按规范解析并**独立重做** matrix/TRC 变换，与本库逐字段、逐样本比对；并对 v4 的 `mAB `/`mBA ` 做独立结构对拍（网格、精度、各段曲线条数、矩阵项数）；
    - `link_golden_wbtest.mbt`：lcms2 生成的 4096 个彩色样本金标（matrix/TRC → matrix/TRC）；
    - `clut_golden_wbtest.mbt`：625 个 CLUT 网格节点 + 300 个 lcms2 CMYK 样本；
    - `cross_link_golden_wbtest.mbt`：lcms2 生成的跨类型链接金标（sRGB ↔ CMYK 各 300 个随机样本）；
    - `intent_golden_wbtest.mbt`：lcms2 生成的四种渲染意图金标（200 个随机 RGB 样本，四意图共用输入）；
+   - `v4lut_golden_wbtest.mbt`：lcms2 生成的 v4 LUT 金标（`A2B0`/`A2B1`/`B2A0`/`B2A1` × 40 样本）；
 4. **网格节点**：CLUT 节点值不依赖插值细节，任何正确实现在节点上都必须
-   返回存储值。这一层单独钉住**解析、索引步长、Lab 解码**。
+   返回存储值。这一层单独钉住**解析、索引步长、Lab 解码**；
+   `v4lut_wbtest.mbt` 里还有一条同类的 v4 节点判据。
 
 **实测结果**：
 
@@ -440,6 +518,10 @@ python tools/diff_oracle.py js         # 同上，js 后端
   - CMYK → sRGB：完全一致 173、差 1 级 125、差 2 级 2，最大偏差 2 级。
 - 渲染意图对 lcms2（200 个随机样本，8 位域）：感知 / 相对比色 / 饱和度
   三种意图**最大偏差 ≤ 2 级、一致率 ≥ 60%**；绝对比色见上文「已知限制」。
+- ICC v4 LUT 对 lcms2（`test4.icc`，40 个样本，8 位域）：`A2B0` **40/40 完全一致**
+  （偏差 0），`A2B1` 39/40、`B2A0` 38/40、`B2A1` 39/40，**最大偏差均为 1 级**。
+- v4 结构差分（`tools/diff_oracle.py`）：Python 独立解析的网格、精度、曲线条数与
+  矩阵项数，与库的输出全部吻合。
 
 
 **判据验证**（主动植入 bug 确认判据是活的，不是空转）：
@@ -451,6 +533,11 @@ python tools/diff_oracle.py js         # 同上，js 后端
 | 矩阵求逆漏掉转置 | 5 项变红（lcms2 一致率跌到 0%） |
 | CLUT 维度步长顺序写反 | **4 项变红**（节点偏差 91 个 L 单位，lcms2 差 93 级） |
 | LUT 侧 PCS 不做 Lab↔XYZ 转换 | **2 项变红**（偏差 255 级，即完全错） |
+| `mAB`/`mBA` 矩阵段按"8 字节类型头 + 矩阵"读 | **5 项变红**（偏差 215–255 级） |
+| 取消曲线段 4 字节对齐 | 1 项变红（合成 tag 判据报出 `..cu` 非法曲线类型） |
+| 交换两个方向的插值方式 | 2 项变红（A2B0 差 3 级、B2A0 差 4 级） |
+| `mBA` 阶段顺序颠倒（矩阵与 M 曲线互换） | 1 项变红（偏差 255 级） |
+| 忽略矩阵的偏移项 | 1 项变红（偏差 255 级） |
 
 矩阵求逆那条是开发中真实出现过的 bug：逆矩阵写成了转置，与 lcms2 在 8 位域上
 最大差 **173/255**。**灰阶样本完全测不出它**（灰阶只走矩阵的对角路径），
@@ -466,7 +553,9 @@ python tools/diff_oracle.py js         # 同上，js 后端
 |---|---|---|---|
 | [Little-CMS (lcms2)](https://github.com/mm2/Little-CMS) | C | MIT | ICC 规范的工程化解读、tag 处理策略 |
 
-> lcms2 采用 MIT 许可证，与本项目 Apache-2.0 兼容。本项目未链接、未编译、未复制其代码；如后续引入其任何代码，将按其许可证要求注明。
+> lcms2 采用 MIT 许可证，与本项目 Apache-2.0 兼容。本项目未链接、未编译、未复制其代码；
+> 仓库内只包含它的**测试用 profile** `testdata/test4.icc`（用于建立 ICC v4 LUT 判据），
+> 其来源、许可与 MIT 声明全文见 [`testdata/README.md`](testdata/README.md)。
 
 ## 许可证
 

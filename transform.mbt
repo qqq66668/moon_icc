@@ -494,8 +494,8 @@ enum SourceStage {
   /// matrix/TRC 型：直接得到 PCS XYZ。
   MatrixTrcSource(MatrixTrcTransform)
   /// LUT 型：A2B 表输出 PCS Lab，需再转 XYZ 以统一中间表示。
-  /// 第二个参数表示该 profile 是否使用 ICC v2 的 PCS 编码。
-  LutSource(Clut, Bool)
+  /// 第二个参数表示该表是否使用 ICC v2 的 PCS 编码。
+  LutSource(LutTable, Bool)
 }
 
 ///|
@@ -506,8 +506,8 @@ enum DestinationStage {
   /// matrix/TRC 型：由 XYZ 求逆得到设备值。
   MatrixTrcDest(InverseMatrixTrc)
   /// LUT 型：由 XYZ 转 Lab 后查 B2A 表。
-  /// 第二个参数表示该 profile 是否使用 ICC v2 的 PCS 编码。
-  LutDest(Clut, Bool)
+  /// 第二个参数表示该表是否使用 ICC v2 的 PCS 编码。
+  LutDest(LutTable, Bool)
 }
 
 ///|
@@ -550,7 +550,8 @@ fn build_source(
   if profile.has_matrix_trc() {
     MatrixTrcSource(profile.matrix_trc())
   } else if profile.has_lut() {
-    LutSource(profile.a2b(intent), profile.is_v2())
+    let table = profile.a2b(intent)
+    LutSource(table, table.pcs_is_v2(profile.is_v2()))
   } else {
     raise BadTagData(
       tag="A2B0",
@@ -568,7 +569,8 @@ fn build_destination(
   if profile.has_matrix_trc() {
     MatrixTrcDest(profile.matrix_trc().inverse())
   } else if profile.has_lut() {
-    LutDest(profile.b2a(intent), profile.is_v2())
+    let table = profile.b2a(intent)
+    LutDest(table, table.pcs_is_v2(profile.is_v2()))
   } else {
     raise BadTagData(
       tag="B2A0",
@@ -648,7 +650,7 @@ pub fn ColorTransform::intent(self : ColorTransform) -> Int32 {
 pub fn ColorTransform::source_channels(self : ColorTransform) -> Int32 {
   match self.source {
     MatrixTrcSource(_) => 3
-    LutSource(table, _) => table.input_channels
+    LutSource(table, _) => table.input_channels()
   }
 }
 
@@ -657,7 +659,7 @@ pub fn ColorTransform::source_channels(self : ColorTransform) -> Int32 {
 pub fn ColorTransform::destination_channels(self : ColorTransform) -> Int32 {
   match self.destination {
     MatrixTrcDest(_) => 3
-    LutDest(table, _) => table.output_channels
+    LutDest(table, _) => table.output_channels()
   }
 }
 
@@ -688,7 +690,7 @@ fn SourceStage::to_pcs(self : SourceStage, inputs : Array[Double]) -> XyzNumber 
       )
     LutSource(table, is_v2) => {
       let raw = table.evaluate(inputs)
-      lab_to_xyz(clut_output_to_lab(raw, table.bit_depth, is_v2))
+      lab_to_xyz(clut_output_to_lab(raw, table.bit_depth(), is_v2))
     }
   }
 }
@@ -705,7 +707,7 @@ fn DestinationStage::from_pcs(
       [r, g, b]
     }
     LutDest(table, is_v2) => {
-      let encoded = lab_to_clut_input(xyz_to_lab(xyz), table.bit_depth, is_v2)
+      let encoded = lab_to_clut_input(xyz_to_lab(xyz), table.bit_depth(), is_v2)
       table.evaluate(encoded)
     }
   }

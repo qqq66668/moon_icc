@@ -16,6 +16,18 @@ fn cmyk_profile() -> Profile raise {
 }
 
 ///|
+/// 取出 v2 的 `mft1`/`mft2` 表（测试用）。
+///
+/// `Profile::a2b`/`b2a` 统一返回 `LutTable`（v2 与 v4 的 LUT 共用入口），
+/// 这里断言拿到的是 v2 分支，以便直接检查其结构字段。
+fn as_v2_table(t : LutTable) -> Clut {
+  match t {
+    LutV2(c) => c
+    LutV4(_) => abort("期望 v2 的 mft1/mft2 表，实得 v4 的 mAB/mBA")
+  }
+}
+
+///|
 /// 把连续 Lab 量化成 Pillow LAB 模式的 8 位表示。
 ///
 /// Pillow 约定：L 通道 0..255 ↔ 0..100，a/b 通道 0..255 ↔ -128..127。
@@ -60,7 +72,7 @@ fn clamp_i(x : Int32, lo : Int32, hi : Int32) -> Int32 {
 /// 并按 v2 Lab 编码换算）生成，不经过本库任何代码。
 test "CLUT: 625 个网格节点与独立解析一致" {
   let profile = cmyk_profile()
-  let table = profile.a2b(1)
+  let table = as_v2_table(profile.a2b(1))
   inspect(table.input_channels, content="4")
   inspect(table.output_channels, content="3")
   inspect(table.grid_points, content="9")
@@ -181,7 +193,7 @@ test "CLUT: 意图映射到不同的 tag" {
 /// B2A 方向（PCS → 设备）也应能解析出 LUT。
 test "CLUT: B2A 方向可解析" {
   let profile = cmyk_profile()
-  let table = profile.b2a(1)
+  let table = as_v2_table(profile.b2a(1))
   inspect(table.input_channels, content="3")
   inspect(table.output_channels, content="4")
   inspect(table.grid_points, content="17")
@@ -249,7 +261,7 @@ test "CLUT: 8 位与 16 位解码路径不同" {
 /// 输入通道数超出 LUT 声明时应当安全处理（多余输入被忽略）。
 test "CLUT: 多余输入通道被忽略" {
   let profile = cmyk_profile()
-  let table = profile.a2b(1)
+  let table = as_v2_table(profile.a2b(1))
   let four : Array[Double] = [0.5, 0.5, 0.5, 0.5]
   let extra : Array[Double] = [0.5, 0.5, 0.5, 0.5, 0.9, 0.9]
   let a = table.evaluate(four)
@@ -265,7 +277,7 @@ test "CLUT: 多余输入通道被忽略" {
 /// 输入缺失时按 0 处理，不得越界。
 test "CLUT: 输入不足时按 0 处理" {
   let profile = cmyk_profile()
-  let table = profile.a2b(1)
+  let table = as_v2_table(profile.a2b(1))
   let full : Array[Double] = [0.3, 0.0, 0.0, 0.0]
   let partial : Array[Double] = [0.3]
   let a = table.evaluate(full)

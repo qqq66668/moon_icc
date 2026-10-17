@@ -162,6 +162,12 @@ pub fn BigEndianReader::read_u64(
 
 ///|
 /// 读取 4 字节 ASCII 签名（如 `acsp`、`mntr`、`XYZ `）。
+///
+/// 签名来自外部不可信输入，可能含 NUL 等不可打印字节。这类字节若原样进入
+/// 错误消息，会让日志与测试驱动无法解析（本项目真实踩到过：一个畸形的内嵌
+/// 曲线签名 `\0\0cu` 导致测试结果的 JSON 解析失败）。因此这里把
+/// 可打印 ASCII 之外的字节统一渲染成 `.`——合法签名全部是可打印 ASCII，
+/// 该替换不影响任何查表语义。
 pub fn BigEndianReader::read_signature(
   self : BigEndianReader,
 ) -> String raise IccError {
@@ -170,7 +176,12 @@ pub fn BigEndianReader::read_signature(
   self.pos = at + 4
   let buf = StringBuilder()
   for i = 0; i < 4; i = i + 1 {
-    buf.write_char(self.data[at + i].to_int().unsafe_to_char())
+    let b = self.data[at + i].to_int()
+    if b >= 32 && b < 127 {
+      buf.write_char(b.unsafe_to_char())
+    } else {
+      buf.write_char('.')
+    }
   }
   buf.to_string()
 }
