@@ -538,7 +538,12 @@ moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
 python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
+python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑并核对其中公布的数值
 ```
+
+> `check_readme_examples.py` 与 `verify_publish.py` **不放进 CI 的 push 门禁**：
+> 它们从 mooncakes.io 拉取**已发布版本**，而 push 门禁跑的是**当前源码**——
+> 若改了示例但尚未发布，二者会不一致而产生误报。这两个脚本用于**发布前后**的人工验证。
 
 ### 核心功能 → 判据对照
 
