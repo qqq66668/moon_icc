@@ -439,13 +439,15 @@ pub fn intent_to_b2a_tag(intent : Int32) -> String {
 /// 取出设备 → PCS 的 LUT。
 ///
 /// 若指定意图的 tag 不存在，退回 `A2B0`；都没有则报错。
-pub fn Profile::a2b(self : Profile, intent : Int32) -> Clut raise IccError {
+///
+/// 支持 v2 的 `mft1`/`mft2` 与 v4 的 `mAB `（见 `v4lut.mbt`）。
+pub fn Profile::a2b(self : Profile, intent : Int32) -> LutTable raise IccError {
   let want = intent_to_a2b_tag(intent)
   match self.find_tag(want) {
-    Some(t) => parse_clut_tag(self.data, t)
+    Some(t) => parse_a2b_table(self.data, t)
     None =>
       match self.find_tag("A2B0") {
-        Some(t) => parse_clut_tag(self.data, t)
+        Some(t) => parse_a2b_table(self.data, t)
         None =>
           raise BadTagData(
             tag=want,
@@ -457,13 +459,15 @@ pub fn Profile::a2b(self : Profile, intent : Int32) -> Clut raise IccError {
 
 ///|
 /// 取出 PCS → 设备的 LUT。
-pub fn Profile::b2a(self : Profile, intent : Int32) -> Clut raise IccError {
+///
+/// 支持 v2 的 `mft1`/`mft2` 与 v4 的 `mBA `（见 `v4lut.mbt`）。
+pub fn Profile::b2a(self : Profile, intent : Int32) -> LutTable raise IccError {
   let want = intent_to_b2a_tag(intent)
   match self.find_tag(want) {
-    Some(t) => parse_clut_tag(self.data, t)
+    Some(t) => parse_b2a_table(self.data, t)
     None =>
       match self.find_tag("B2A0") {
-        Some(t) => parse_clut_tag(self.data, t)
+        Some(t) => parse_b2a_table(self.data, t)
         None =>
           raise BadTagData(
             tag=want,
@@ -495,5 +499,5 @@ pub fn Profile::device_to_lab(
   }
   let table = self.a2b(intent)
   let raw = table.evaluate(inputs)
-  clut_output_to_lab(raw, table.bit_depth, self.is_v2())
+  clut_output_to_lab(raw, table.bit_depth(), table.pcs_is_v2(self.is_v2()))
 }
