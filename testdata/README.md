@@ -8,6 +8,7 @@
 | `display.icc` | 同上目录的显示器 profile（v2.2） | 同上 |
 | `cmyk_printer.icc` | 同上目录的打印机 profile（v2.0，CMYK，PCS 为 Lab） | 同上 |
 | `test4.icc` | [Little-CMS](https://github.com/mm2/Little-CMS) 仓库 `testbed/test4.icc` | Little-CMS 以 **MIT 许可**发布；该文件自带说明 "Test profile, not suitable for real use"（见其 `desc` 与 `cprt` 字段） |
+| `xyz_lut.icc` | 本仓库合成，生成脚本 `tools/gen_xyz_lut_profile.py` | 无第三方版权；PCS 为 `XYZ ` 的 v4 LUT profile（本机与 Little-CMS 测试套件都没有这种样本）。生成脚本会当场用 lcms2 复核它能被参考实现读取与变换 |
 
 ## 为什么需要 `test4.icc`
 

@@ -188,7 +188,7 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | 渲染意图：感知 / 媒体相对比色 / 饱和度 | ✅ 已完成并验证 |
 | 渲染意图：绝对比色 | **已知限制**，见下文（与相对比色相同路径） |
 | `mAB` / `mBA`（ICC v4 LUT） | ✅ 已完成并验证 |
-| PCS 为 `XYZ ` 的 LUT 型 profile | 计划中 |
+| PCS 为 `XYZ ` 的 LUT 型 profile | ✅ 已完成并验证（v4 样本；v2 路径无样本，见「明确不做」） |
 
 ## CLUT 型 profile 变换
 
@@ -312,9 +312,12 @@ mBA：B 曲线 → 矩阵 → M 曲线 → CLUT → A 曲线
 | tag | 方向 | 完全一致 | 差 1 级 | 最大偏差 |
 |---|---|---|---|---|
 | `A2B0` | 设备 → PCS | **40/40** | 0 | **0 级** |
-| `A2B1` | 设备 → PCS | 39/40 | 1 | 1 级 |
+| `A2B1` | 设备 → PCS | **40/40** | 0 | **0 级** |
 | `B2A0` | PCS → 设备 | 38/40 | 2 | 1 级 |
 | `B2A1` | PCS → 设备 | 39/40 | 1 | 1 级 |
+
+两张 A2B 表**逐位一致**：金标取 lcms2 的 `NOOPTIMIZE` 精确路径
+（默认路径会把管线重采样成近似 CLUT，在合成 XYZ 样本上实测会让 b 通道差 4 级）。
 
 判据还包含一层**不依赖插值**的节点检查：`A2B0` 的曲线与矩阵全为恒等，
 因此其输出必须精确等于 CLUT 节点值；节点值由测试**直接读原始字节**得到
@@ -327,6 +330,47 @@ PCS → 设备方向**不能**用 `LAB` 模式输入直接对拍：实测参考�
 探针 profile 反解坐标，`L8=1` 时坐标是 0.0353 而非 0.0039，即近黑处抬高约
 8/255）。因此金标改用 **`RGB → RGB` 组合变换**（内部先 A2B 再 B2A），
 避开该格式器，否则会把参考实现的行为记成本库的误差。
+
+## PCS 为 `XYZ ` 的 LUT 型 profile
+
+LUT 型 profile 的 PCS 既可以是 `Lab `，也可以是 `XYZ `。两者的**编码不同**：
+
+| PCS | 编码 | 1.0 对应 | 上限 |
+|---|---|---|---|
+| `Lab `（v2） | 16 位线性 | — | `0xFF00`（L=100） |
+| `Lab `（v4） | 16 位线性 | — | `0xFFFF`（L=100） |
+| `XYZ `（v2 与 v4 相同） | **u1Fixed15Number** | **`0x8000`** | `0xFFFF` = 1.99997 |
+
+即 XYZ 的 PCS 值是 `原始值 / 32768`（8 位表值是 `原始值 / 128`），
+**与 profile 版本无关**——这一点与 Lab 恰好相反，也是实现时最容易搞错的地方。
+若误按满量程 `0xFFFF` 解释，所有颜色坐标会整体缩小一半。
+
+本库把两个方向统一到 PCS XYZ 作为中间表示：A2B 输出按上表解码，
+B2A 输入按上表编码，因此 `Lab ` 与 `XYZ ` PCS 的 profile 可以互相链接。
+
+### 样本是合成的
+
+本机（Windows 驱动目录）与参考实现的测试套件里，带 LUT 的 profile **全是 `Lab ` PCS**，
+因此 `XYZ ` PCS 没有现成样本可建立判据。仓库里的 `testdata/xyz_lut.icc` 由
+`tools/gen_xyz_lut_profile.py` 合成：设备白点映射到 PCS 白点 D50，
+`A2B0`/`B2A0` 都是恒等曲线 + 2×2×2 线性 CLUT，且**能被参考实现读取与变换**
+（生成脚本会当场用 lcms2 复核）。线性斜坡让期望值有闭式解：
+
+```
+A2B0：XYZ = 设备值 × D50
+B2A0：设备值 = XYZ / 1.99997…
+组合：设备输出 = 设备输入 × D50 / 1.99997…
+```
+
+实测（8 位域，26 个样本）：
+
+| 方向 | 与 lcms2 完全一致 | 最大偏差 | 与解析期望的最大偏差 |
+|---|---|---|---|
+| 设备 → PCS Lab | **26/26** | **0 级** | — |
+| 组合（设备 → PCS → 设备） | **26/26** | **0 级** | 1 级（量化） |
+
+另外测试直接读文件的 CLUT 原始值，要求解码结果恰为 `原始值/32768`——
+这条判据不依赖插值，只看编码常数。
 
 ## 与 lcms2 的交叉核对（重要）
 
@@ -376,6 +420,8 @@ python tools/gen_clut_golden.py        # 生成 CLUT 金标（网格节点 + lcm
 python tools/gen_cross_link_golden.py  # 生成跨类型链接金标
 python tools/gen_intent_golden.py      # 生成四种渲染意图金标
 python tools/gen_v4lut_golden.py       # 生成 ICC v4 LUT（mAB/mBA）金标
+python tools/gen_xyz_lut_profile.py    # 合成 PCS 为 XYZ 的 LUT profile（并用 lcms2 复核）
+python tools/gen_xyz_golden.py         # 生成合成 XYZ profile 的金标
 python tools/lcms2_flags_check.py      # 复现 flags 对比表
 python tools/lcms2_deviation_report.py # 复现链接偏差分布表
 python tools/lcms2_intent_check.py     # 复现"哪些 profile 能区分意图"
@@ -454,7 +500,10 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 
 - **绝对比色的白点缩放**：编号 3 当前与媒体相对比色（编号 1）相同。本项目按标准形式实现过白点缩放，但实测与 lcms2 的偏差从 20 级恶化到 107 级，说明该形式与参考实现的语义不符；在无法确定参考语义前不发布猜测实现。详见上文「渲染意图」。
 - **感知 / 饱和度意图的 gamut mapping**：本库通过选取 `A2B0`/`A2B2` 表来体现意图，与 lcms2 在这两种意图下交叉核对通过；但不自行做色域映射（映射规则由 profile 内的 LUT 承载）。
-- **PCS 为 `XYZ ` 的 LUT 型 profile**：XYZ 的编码范围与 Lab 不同，尚未实现，会显式报错而非静默给出错误颜色。
+- **PCS 为 `XYZ ` 的 LUT 型 profile**：已实现并通过验证，但**只覆盖了 v4（`mAB `/`mBA `）样本**——
+  本机与参考实现的测试套件里带 LUT 的 profile 全是 `Lab ` PCS，`XYZ ` PCS 的样本是合成的
+  （`testdata/xyz_lut.icc`）。v2 的 `mft1`/`mft2` + `XYZ ` PCS 组合走同一段解码代码，
+  但**没有真实样本，未建立判据**。另：PCS 为其他取值时会显式报错，不静默给出错误颜色。
 - **黑点补偿（BPC）**：不做。
 - **图像文件读写**（PNG / JPEG / TIFF）：本库只处理色彩数值，不碰图像容器。4 通道（CMYK）的求值本身已可用。
 - **软打样、色貌模型**：不做。
@@ -481,7 +530,7 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 73 项测试
+moon test --target wasm-gc     # 78 项测试
 moon test --target js          # 同一套测试，js 后端
 moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
@@ -501,6 +550,7 @@ python tools/diff_oracle.py js         # 同上，js 后端
    - `cross_link_golden_wbtest.mbt`：lcms2 生成的跨类型链接金标（sRGB ↔ CMYK 各 300 个随机样本）；
    - `intent_golden_wbtest.mbt`：lcms2 生成的四种渲染意图金标（200 个随机 RGB 样本，四意图共用输入）；
    - `v4lut_golden_wbtest.mbt`：lcms2 生成的 v4 LUT 金标（`A2B0`/`A2B1`/`B2A0`/`B2A1` × 40 样本）；
+   - `xyz_lut_golden_wbtest.mbt`：lcms2 生成的合成 XYZ-PCS profile 金标（`RGB→LAB` 与 `RGB→RGB` 各 26 样本）；
 4. **网格节点**：CLUT 节点值不依赖插值细节，任何正确实现在节点上都必须
    返回存储值。这一层单独钉住**解析、索引步长、Lab 解码**；
    `v4lut_wbtest.mbt` 里还有一条同类的 v4 节点判据。
@@ -518,10 +568,12 @@ python tools/diff_oracle.py js         # 同上，js 后端
   - CMYK → sRGB：完全一致 173、差 1 级 125、差 2 级 2，最大偏差 2 级。
 - 渲染意图对 lcms2（200 个随机样本，8 位域）：感知 / 相对比色 / 饱和度
   三种意图**最大偏差 ≤ 2 级、一致率 ≥ 60%**；绝对比色见上文「已知限制」。
-- ICC v4 LUT 对 lcms2（`test4.icc`，40 个样本，8 位域）：`A2B0` **40/40 完全一致**
-  （偏差 0），`A2B1` 39/40、`B2A0` 38/40、`B2A1` 39/40，**最大偏差均为 1 级**。
+- ICC v4 LUT 对 lcms2（`test4.icc`，40 个样本，8 位域）：`A2B0` 与 `A2B1` 均
+  **40/40 完全一致（偏差 0）**，`B2A0` 38/40、`B2A1` 39/40，最大偏差 1 级。
+- PCS 为 `XYZ ` 的 LUT（合成 `xyz_lut.icc`，26 个样本，8 位域）：设备→PCS Lab 与
+  组合变换均 **26/26 完全一致（偏差 0）**。
 - v4 结构差分（`tools/diff_oracle.py`）：Python 独立解析的网格、精度、曲线条数与
-  矩阵项数，与库的输出全部吻合。
+  矩阵项数，与库的输出全部吻合（含合成 XYZ profile 的 `A3/M0/B3` 结构）。
 
 
 **判据验证**（主动植入 bug 确认判据是活的，不是空转）：
@@ -538,6 +590,9 @@ python tools/diff_oracle.py js         # 同上，js 后端
 | 交换两个方向的插值方式 | 2 项变红（A2B0 差 3 级、B2A0 差 4 级） |
 | `mBA` 阶段顺序颠倒（矩阵与 M 曲线互换） | 1 项变红（偏差 255 级） |
 | 忽略矩阵的偏移项 | 1 项变红（偏差 255 级） |
+| XYZ PCS 解码误按 u1Fixed16（数字 32768→65535） | **3 项变红**（节点判据报出 2 倍偏差，端到端差 61–64 级） |
+| XYZ PCS 编码（逆方向）误按 u1Fixed16 | 1 项变红（组合变换差 127 级） |
+| 缺省的曲线段返回空数组而非透传 | **3 项变红**（合成 profile 的最大输入处整体输出 0） |
 
 矩阵求逆那条是开发中真实出现过的 bug：逆矩阵写成了转置，与 lcms2 在 8 位域上
 最大差 **173/255**。**灰阶样本完全测不出它**（灰阶只走矩阵的对角路径），

@@ -1,0 +1,195 @@
+# -*- coding: utf-8 -*-
+"""生成合成 ICC v4 profile：PCS 为 XYZ 的 LUT 型 profile。
+
+本机（Windows 驱动目录 + lcms2 测试套件）里**没有** PCS 为 XYZ 的 LUT 型
+profile，而这是本库最后一个计划内缺口，因此这里合成一个：
+
+- 设备色空间 `RGB `，PCS 为 `XYZ `，设备类别 `mntr`；
+- `A2B0`（`mAB `）：2×2×2 CLUT，节点 `(i,j,k)` 的 XYZ 取
+  `(i,j,k) × D50 白点 × 32768`（XYZ 的 PCS 编码是 **u1Fixed15**，
+  1.0 = 0x8000）。因此设备白点恰好映射到 **PCS 白点 D50**——
+  这与真实 profile 的行为一致，也避免触发参考实现的"白点失配色适应"；
+- `B2A0`（`mBA `）：2×2×2 CLUT，节点取 `(i,j,k) × 65535`，
+  即设备值 = 输入坐标；
+- 两条管线都带恒等 A/B 曲线（参考实现的 `mAB ` 写回只接受
+  `B` / `M-Matrix-B` / `A-CLUT-B` / `A-CLUT-M-Matrix-B` 四种组合，
+  裸 CLUT 的 profile 能读不能写），没有矩阵。
+
+由此可以推出**解析期望值**（线性斜坡上插值精确，仅有 16 位取整误差）：
+
+    A2B0：设备 v → XYZ = v × (0.9642, 1.0, 0.8249)
+    B2A0：XYZ → 设备 = XYZ × 32768/65535 = XYZ / 1.99997…
+    组合（RGB→RGB）：v → v × D50 / 1.99997…
+
+这些期望值只依赖 **XYZ PCS 的编码常数**——若把 u1Fixed15 误当成
+u1Fixed16（满量程 0xFFFF），结果会整体差 2 倍。
+
+输出：`testdata/xyz_lut.icc`（合成，仓库自身产物，无第三方版权问题）。
+"""
+import os
+import struct
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+OUT = os.path.join(ROOT, "testdata", "xyz_lut.icc")
+
+GRID = 2
+
+
+def sf16(x):
+    """s15Fixed16Number。"""
+    return struct.pack(">i", int(round(x * 65536.0)))
+
+
+def identity_curves(count):
+    """`count` 条恒等曲线（`curv` 项数 0）。"""
+    out = b""
+    for _ in range(count):
+        out += b"curv" + b"\0\0\0\0" + struct.pack(">I", 0)
+    return out  # 每条 12 字节，天然 4 字节对齐
+
+
+def build_lut_tag(tag_sig, node_values):
+    """构造 mAB / mBA tag：A 曲线 → CLUT → B 曲线（均为恒等曲线 + 2×2×2 CLUT）。
+
+    注意：参考实现的 `mAB` 写回只接受四种组合（B / M-Matrix-B / A-CLUT-B /
+    A-CLUT-M-Matrix-B）——**裸 CLUT 不在其中**，那样的 profile 能读不能写，
+    Pillow 回写输出 profile 时会报 "Could not determine profile size"。
+    """
+    body = bytearray()
+    body += tag_sig + b"\0\0\0\0"
+    body += struct.pack(">BBH", 3, 3, 0)
+    off_pos = len(body)
+    body += b"\0" * 20  # B, Mat, M, C, A 占位
+
+    a_off = len(body)
+    body += identity_curves(3)
+
+    clut_off = len(body)
+    body += bytes([GRID, GRID, GRID] + [0] * 13)
+    body += bytes([2, 0, 0, 0])  # 精度 2 字节 + 3 保留
+    for (x, y, z) in node_values:
+        body += struct.pack(">HHH", x, y, z)
+
+    b_off = len(body)
+    body += identity_curves(3)
+
+    # 偏移顺序：B, Mat, M, C, A
+    struct.pack_into(">5I", body, off_pos, b_off, 0, 0, clut_off, a_off)
+    return bytes(body)
+
+
+def mluc(text):
+    """desc 用的 mluc 标签（recordCount/recordSize 的顺序容易写错）。"""
+    raw = text.encode("utf-16-be")
+    rec = struct.pack(">HHII", 0x656E, 0x5553, len(raw), 28)  # en-US，offset=28
+    payload = b"mluc" + b"\0\0\0\0" + struct.pack(">II", 1, 12) + rec + raw
+    payload += b"\0" * ((4 - len(payload) % 4) % 4)
+    return payload
+
+
+def xyz_tag(x, y, z):
+    return b"XYZ " + b"\0\0\0\0" + sf16(x) + sf16(y) + sf16(z)
+
+
+def build():
+    # D50 白点：PCS 的参考白。设备白点映射到它，才与真实 profile 一致，
+    # 否则参考实现会插入一次"白点失配"色适应，双方口径就不同了。
+    white = (0.9642, 1.0, 0.8249)
+    a2b_nodes = []
+    b2a_nodes = []
+    for i in range(GRID):
+        for j in range(GRID):
+            for k in range(GRID):
+                # A2B0：(i,j,k) × D50 × 32768（u1Fixed15）
+                a2b_nodes.append(
+                    (
+                        int(round(i * white[0] * 32768)),
+                        int(round(j * white[1] * 32768)),
+                        int(round(k * white[2] * 32768)),
+                    )
+                )
+                # B2A0：设备值满量程 0xFFFF
+                b2a_nodes.append((i * 65535, j * 65535, k * 65535))
+
+    tag_data = [
+        (b"desc", mluc("Synthetic XYZ PCS LUT profile")),
+        (b"wtpt", xyz_tag(0.9642, 1.0, 0.8249)),
+        (b"A2B0", build_lut_tag(b"mAB ", a2b_nodes)),
+        (b"B2A0", build_lut_tag(b"mBA ", b2a_nodes)),
+    ]
+
+    n = len(tag_data)
+    offset = 132 + n * 12
+    entries = b""
+    blob = b""
+    for sig, d in tag_data:
+        entries += sig + struct.pack(">II", offset, len(d))
+        blob += d
+        offset += len(d)
+        while offset % 4:
+            blob += b"\0"
+            offset += 1
+
+    hdr = bytearray(128)
+    hdr[4:8] = b"prb "
+    hdr[8:12] = bytes([4, 0x30, 0, 0])  # v4.3
+    hdr[12:16] = b"mntr"
+    hdr[16:20] = b"RGB "
+    hdr[20:24] = b"XYZ "
+    hdr[24:36] = struct.pack(">6H", 2026, 10, 17, 0, 0, 0)
+    hdr[36:40] = b"acsp"
+    hdr[40:44] = b"    "
+    hdr[64:68] = struct.pack(">I", 0)
+    hdr[68:80] = sf16(0.9642) + sf16(1.0) + sf16(0.8249)
+    hdr[80:84] = b"prb "
+
+    out = bytes(hdr) + struct.pack(">I", n) + entries + blob
+    out = struct.pack(">I", len(out)) + out[4:]
+    with open(OUT, "wb") as f:
+        f.write(out)
+    print(f"已写出 {OUT}：{len(out)} 字节，{n} 个 tag")
+    return out
+
+
+def verify_with_lcms2():
+    """用 lcms2 验证解析期望值，并检查本库的编码假设是否成立。"""
+    from PIL import Image, ImageCms
+
+    prof = ImageCms.getOpenProfile(OUT)
+    print("描述:", ImageCms.getProfileDescription(prof))
+    print(
+        "colorSpace:",
+        prof.profile.xcolor_space,
+        " connectionSpace:",
+        prof.profile.connection_space,
+    )
+    tr = ImageCms.buildTransform(
+        prof, prof, "RGB", "RGB", renderingIntent=0, flags=0x0100 | 0x0040
+    )
+    samples = [(0, 0, 0), (255, 255, 255), (128, 128, 128), (64, 192, 32),
+               (255, 0, 0), (0, 0, 255), (17, 34, 51)]
+    im = Image.new("RGB", (len(samples), 1))
+    im.putdata(samples)
+    out = ImageCms.applyTransform(im, tr)
+    white = (0.9642, 1.0, 0.8249)
+    scale = 65535.0 / 32768.0
+    print("\n RGB 输入 | lcms2 输出 | 解析期望 v×D50/1.99997 | 差")
+    worst = 0
+    for rgb, got in zip(samples, [tuple(out.getdata())[i] for i in range(len(samples))]):
+        want = tuple(
+            int(round(rgb[c] / 255.0 * white[c] / scale * 255.0)) for c in range(3)
+        )
+        d = max(abs(a - b) for a, b in zip(got, want))
+        worst = max(worst, d)
+        print(f"  {str(rgb):16s} {str(got):16s} {str(want):16s} {d}")
+    print(f"\n最大偏差 {worst} 级")
+    print("（若整体差约 2 倍，说明 u1Fixed15 的假设不成立）")
+
+
+if __name__ == "__main__":
+    build()
+    verify_with_lcms2()
