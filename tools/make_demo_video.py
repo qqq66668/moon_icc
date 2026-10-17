@@ -110,6 +110,18 @@ SCENE_SPECS = [
         "mft2 查找表：输入表 → CLUT 多线性插值 → 输出表；网格节点偏差 < 1e-6",
         21,
     ),
+    (
+        "ICC v4 LUT：mAB / mBA",
+        ["lut", "testdata/test4.icc"],
+        "v4 的 lutAToBType / lutBToAType；矩阵段没有类型头、曲线段没有长度字段",
+        15,
+    ),
+    (
+        "PCS 为 XYZ 的 LUT",
+        ["lut", "testdata/xyz_lut.icc"],
+        "XYZ 的 PCS 编码是 u1Fixed15（1.0 = 0x8000），与 v2/v4 版本无关",
+        15,
+    ),
 ]
 
 print("采集真实命令输出 ...")
