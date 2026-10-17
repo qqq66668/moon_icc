@@ -537,7 +537,21 @@ moon test --target js          # 同一套测试，js 后端
 moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
+python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
 ```
+
+### 核心功能 → 判据对照
+
+| 核心功能 | 覆盖它的判据 |
+|---|---|
+| profile 解析（头部 + tag 表 + 边界校验） | `header_wbtest.mbt`（合成字节流，含畸形输入）；`tools/diff_oracle.py` 对 5 个真实 profile 逐字段比对 |
+| matrix/TRC 变换与逆变换 | `transform_wbtest.mbt`；`link_golden_wbtest.mbt`（4096 彩色样本对 lcms2）；差分脚本逐位比对 |
+| LUT 变换（`mft1`/`mft2`） | `clut_wbtest.mbt`（625 个网格节点 + 300 个 lcms2 CMYK 样本）；`tools/gen_clut_golden.py` 反解输入表定位节点 |
+| LUT 变换（`mAB `/`mBA `，v4） | `v4lut_wbtest.mbt`（节点判据读原始字节 + 40 样本对 lcms2）；`tools/diff_oracle.py` 独立结构对拍 |
+| PCS 为 `XYZ ` 的 LUT | `xyz_lut_wbtest.mbt`（u1Fixed15 编码常数判据 + 26 样本双向对拍 + 解析期望式） |
+| 多 profile 链接（四种跨类型组合） | `cross_link_wbtest.mbt` + `cross_link_golden_wbtest.mbt`（sRGB ↔ CMYK 各 300 样本） |
+| 渲染意图（感知 / 相对 / 饱和度 / 绝对） | `intent_wbtest.mbt` + `intent_golden_wbtest.mbt`（200 样本 × 四意图）；绝对比色显式断言与相对比色逐点相同 |
+| 命令行示例与端到端可用性 | `cmd/main` 四子命令；`tools/verify_publish.py` 在仓库之外的空工程里 `moon add` 实拉并运行 |
 
 判据分四层，独立性递增：
 
