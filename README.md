@@ -2,7 +2,7 @@
 
 纯 MoonBit 实现的 **ICC 色彩管理引擎**：解析 ICC profile 并执行真实色空间变换，不依赖任何 C 库或系统色彩管理系统。
 
-[![CI](https://github.com/LL728/moon_icc/actions/workflows/ci.yml/badge.svg)](https://github.com/LL728/moon_icc/actions/workflows/ci.yml)
+[![CI](https://github.com/qqq66668/moon_icc/actions/workflows/ci.yml/badge.svg)](https://github.com/qqq66668/moon_icc/actions/workflows/ci.yml)
 
 ![演示预览](demo/preview.png)
 
@@ -31,14 +31,14 @@ MoonBit 生态里已有图像处理与渲染栈（图像编解码、2D 光栅化
 ## 安装
 
 ```
-moon add LL728/moon_icc
+moon add qqq66668/moon_icc
 ```
 
 在 `moon.pkg` 中导入：
 
 ```
 import {
-  "LL728/moon_icc",
+  "qqq66668/moon_icc",
 }
 ```
 

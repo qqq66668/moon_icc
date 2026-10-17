@@ -230,7 +230,7 @@ OUTRO_LINES = [
     "跨类型链接：sRGB 与 CMYK 互通",
     "每条判据都经「植入 bug → 变红 → 恢复」验证",
     "",
-    "Apache-2.0 · LL728/moon_icc",
+    "Apache-2.0 · qqq66668/moon_icc",
 ]
 
 
