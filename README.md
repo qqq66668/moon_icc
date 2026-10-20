@@ -131,7 +131,84 @@ link 0 0 0 0 255
 link 1 1 2 1 255
 ...
 ```
-...
+
+### 软打样（soft proofing）
+
+在一台显示器上预看「这张图印在目标设备上会是什么样」。链路是
+
+```text
+源设备值 → PCS → 打样设备值 → PCS → 显示设备值
+             A2B    B2A         A2B    B2A
+```
+
+中间那次往返是关键：它把超出打样设备色域的颜色按该设备的实际能力裁掉。
+
+```moonbit
+let chain = @moon_icc.ColorTransform::proofing(
+  @moon_icc.Profile::parse(@fs.read_file_to_bytes("sRGB Color Space Profile.icc")),
+  @moon_icc.Profile::parse(@fs.read_file_to_bytes("printer.icc")),   // 打样：CMYK 印刷机
+  @moon_icc.Profile::parse(@fs.read_file_to_bytes("display.icc")),   // 显示设备
+  1,   // 源/显示侧意图：媒体相对比色
+  1,   // 打样意图：也可用 3（绝对比色）
+)
+let (proof_values, shown) = chain.evaluate([ 0.5, 0.5, 0.5 ])
+// proof_values = 印这张图会用到的 CMYK 四个分量
+// shown        = 屏幕上应显示的 RGB
+```
+
+命令行：
+
+```
+moon run cmd/main --target wasm-gc -- proof testdata/srgb.icc testdata/cmyk_printer.icc testdata/display.icc
+```
+
+输出每行 `proof <灰阶> | <打样设备值> | <显示设备值>`：
+
+```
+proof_intent 1
+proof_channels 4
+display_channels 3
+proof 0 | 0 0 0 255 | 41 41 40
+proof 51 | 13 17 16 224 | 61 60 59
+```
+
+打样链与 lcms2 的 `cmsCreateProofingTransform` 交叉核对通过：
+相对/相对 7/16 完全一致、相对/绝对打样 9/16，**两者最大偏差均为 1 级**
+（金标生成器见 `tools/gen_proof_golden.py`）。
+
+### 色域判断（gamut check）
+
+判据：把颜色送进目标设备再送回来，看往返误差多大。
+
+```moonbit
+let source = @moon_icc.Profile::parse(@fs.read_file_to_bytes("sRGB Color Space Profile.icc"))
+let target = @moon_icc.Profile::parse(@fs.read_file_to_bytes("printer.icc"))
+
+// 源设备值 → PCS XYZ（统一入口：matrix/TRC 型与 LUT 型 profile 都适用）
+let xyz = source.device_to_pcs(1, [ 0.0, 1.0, 0.0 ])   // sRGB 纯绿
+let de = target.round_trip_delta_e(1, xyz)             // 往返 ΔE76
+let inside = target.in_gamut(1, xyz)                   // 按自适应容差判定
+println(de)      // 55.83...
+println(inside)  // false —— SWOP CMYK 覆盖不了 sRGB 纯绿
+```
+
+阈值**按 profile 自适应**：取中性灰色的往返误差中位数（色域判定基线）再乘 1.25。
+原因是 CMYK 受 GCR 与总墨量限制，同一 profile 的 A2B 与 B2A 不严格互逆，
+中性灰本就有几个 ΔE 的底噪（本机 Agfa SWOP 约 4.5）；用固定阈值会把
+明明在色域内的灰阶误判成超色域。
+
+命令行：
+
+```
+moon run cmd/main --target wasm-gc -- gamut testdata/srgb.icc testdata/cmyk_printer.icc
+```
+
+```
+tolerance 5.591375629781349
+gamut 0 0 0 0 de=12.88 out      ← 纸张到不了 L*=0
+gamut 1 255 255 255 de=3.42 in  ← 纸白可表达
+gamut 3 0 255 0 de=55.83 out    ← SWOP CMYK 覆盖不了 sRGB 纯绿
+gamut 12 68 68 68 de=5.19 in    ← 中性灰在色域内
 ```
 
 ### 命令行示例
@@ -144,6 +221,9 @@ moon run cmd/main --target wasm-gc -- transform testdata/srgb.icc
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/display.icc
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc
 moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc saturation
+moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_printer.icc absolute
+moon run cmd/main --target wasm-gc -- proof testdata/srgb.icc testdata/cmyk_printer.icc testdata/display.icc
+moon run cmd/main --target wasm-gc -- gamut testdata/srgb.icc testdata/cmyk_printer.icc
 moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
 moon run cmd/main --target wasm-gc -- lut testdata/test4.icc
 ```
@@ -188,9 +268,11 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | CLUT 型 profile 变换（`mft1` / `mft2`，CMYK 打印机等） | ✅ 已完成并验证 |
 | 跨类型链接（matrix/TRC ↔ LUT 任意组合） | ✅ 已完成并验证 |
 | 渲染意图：感知 / 媒体相对比色 / 饱和度 | ✅ 已完成并验证 |
-| 渲染意图：绝对比色 | **已知限制**，见下文（与相对比色相同路径） |
+| 渲染意图：绝对比色（PCS 白点缩放） | ✅ 已完成并验证（对 lcms2 197/200 完全一致、最大 1 级） |
 | `mAB` / `mBA`（ICC v4 LUT） | ✅ 已完成并验证 |
 | PCS 为 `XYZ ` 的 LUT 型 profile | ✅ 已完成并验证（v4 样本；v2 路径无样本，见「明确不做」） |
+| 软打样链（源 → 打样设备往返 → 显示器） | ✅ 已完成并验证（对 lcms2 proofing 最大偏差 1 级） |
+| 色域判断（往返 ΔE76 + 自适应容差） | ✅ 已完成并验证 |
 
 ## CLUT 型 profile 变换
 
@@ -444,7 +526,7 @@ moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_print
 | 0 | 感知 | `perceptual` | 用 `A2B0`/`B2A0` |
 | 1 | 媒体相对比色（默认） | `relative` | 用 `A2B1`/`B2A1` |
 | 2 | 饱和度 | `saturation` | 用 `A2B2`/`B2A2` |
-| 3 | 绝对比色 | `absolute` | **同 1（已知限制，见下）** |
+| 3 | 绝对比色 | `absolute` | 用 `A2B1`/`B2A1`，**外加 PCS 白点缩放** |
 
 非法名称会被拒绝并给出可选值，不静默回退到默认意图。
 
@@ -457,19 +539,28 @@ moon run cmd/main --target wasm-gc -- link testdata/srgb.icc testdata/cmyk_print
 ### 含多张 LUT 的 profile 意图确实可区分
 
 以本机 CMYK 打印机 profile 为例，以媒体相对比色为基准，感知差 35 级、
-饱和度差 255 级、绝对差 20 级。本库对 0/1/2 三种意图与 lcms2 交叉核对，
+饱和度差 255 级、绝对差 20 级。四种意图都与 lcms2 交叉核对，
 200 个随机 RGB 样本、8 位域下**最大偏差 ≤ 2 级、一致率 ≥ 60%**。
 
-### 绝对比色是已知限制
+### 绝对比色的 PCS 白点缩放
 
-绝对比色需要在 PCS 上做白点缩放。本项目按标准形式实现过
-「源侧乘 `wtpt/D50`、目标侧乘 `D50/wtpt`」，实测与 lcms2 的偏差
-**从 20 级恶化到 107 级**，说明该形式与参考实现的实际语义不符。
+绝对比色**不做白点适应**：源的白点在目标上仍按绝对值呈现。在 D50 相对 PCS 上
+这等价于在两个阶段之间乘 `diag(源媒体白点 / 目标媒体白点)`。
 
-由于无法从可用材料确定参考实现的绝对比色语义，本库**不实现**它：
-编号 3 走与相对比色相同的路径（与 lcms2 的差异 ≤ 20 级），并在测试中
-显式断言「编号 3 与编号 1 逐点相同」。发布一个会把结果改坏的猜测实现，
-比承认这项限制更糟。
+白点按 lcms2 的 `_cmsReadMediaWhitePoint`（`src/cmsio1.c:64`）取：
+
+- 没有 `wtpt` tag → D50；
+- **v2 且设备类为 `mntr`** → D50（老显示器 profile 的 `wtpt` 记的是器件白 D65，
+  而它的矩阵列已经适应到 D50。用 D65 会让 Z 分量多乘约 1.32 倍）；
+- 其余取 `wtpt` 原值（CMYK 打印机记的是纸张白，显著低于 D50）。
+
+本库第一版正是**在源侧乘了标签里的 D65**，导致与 lcms2 的偏差
+从 20 级恶化到 107 级；按上面的取法修正后，200 样本**197/200 完全一致、
+最大偏差 1 级**（`intent_wbtest.mbt`）。这条教训同时写进了
+`Profile::media_white_point` 的文档。
+
+对 sRGB → CMYK 打印机这组 profile：源侧白点按 D50、目标侧为
+(0.8617, 0.8933, 0.7431)，缩放 ≈ (1.119, 1.119, 1.110)。
 
 ## 变换顺序与白点（实现要点）
 
@@ -508,7 +599,9 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
   但**没有真实样本，未建立判据**。另：PCS 为其他取值时会显式报错，不静默给出错误颜色。
 - **黑点补偿（BPC）**：不做。
 - **图像文件读写**（PNG / JPEG / TIFF）：本库只处理色彩数值，不碰图像容器。4 通道（CMYK）的求值本身已可用。
-- **软打样、色貌模型**：不做。
+- **色貌模型（CAM）**：不做。ICC 的 PCS 已隐含观察条件，超出 PCS 的色貌预测（CIECAM02 等）不在本库范围。
+- **黑点补偿（BPC）**：不做。软打样链与色域判断已完成；BPC 是相对比色之上的可选项，
+  其黑点检测依赖 lcms2 那样的迭代反查，本库尚未实现，测试中也不声称支持。
 
 ## 设计要点
 
@@ -532,13 +625,14 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 78 项测试
+moon test --target wasm-gc     # 85 项测试
 moon test --target js          # 同一套测试，js 后端
 moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
 python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
 python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑并核对其中公布的数值
+python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MSYS2 gcc 编译 lcms2）
 ```
 
 > `check_readme_examples.py` 与 `verify_publish.py` **不放进 CI 的 push 门禁**：
@@ -555,7 +649,9 @@ python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑
 | LUT 变换（`mAB `/`mBA `，v4） | `v4lut_wbtest.mbt`（节点判据读原始字节 + 40 样本对 lcms2）；`tools/diff_oracle.py` 独立结构对拍 |
 | PCS 为 `XYZ ` 的 LUT | `xyz_lut_wbtest.mbt`（u1Fixed15 编码常数判据 + 26 样本双向对拍 + 解析期望式） |
 | 多 profile 链接（四种跨类型组合） | `cross_link_wbtest.mbt` + `cross_link_golden_wbtest.mbt`（sRGB ↔ CMYK 各 300 样本） |
-| 渲染意图（感知 / 相对 / 饱和度 / 绝对） | `intent_wbtest.mbt` + `intent_golden_wbtest.mbt`（200 样本 × 四意图）；绝对比色显式断言与相对比色逐点相同 |
+| 渲染意图（感知 / 相对 / 饱和度 / 绝对） | `intent_wbtest.mbt` + `intent_golden_wbtest.mbt`（200 样本 × 四意图）；绝对比色另断言「与相对比色必须不同」以防缩放失效 |
+| 软打样链 | `proofing_wbtest.mbt`（自洽性 + 物理正确性）+ `proof_golden_wbtest.mbt`（lcms2 `cmsCreateProofingTransform` 金标，最大偏差 1 级） |
+| 色域判断 | `proofing_wbtest.mbt`（中性轴基线、灰/白 in、黑与原色 out、判定与 ΔE 自洽） |
 | 命令行示例与端到端可用性 | `cmd/main` 四子命令；`tools/verify_publish.py` 在仓库之外的空工程里 `moon add` 实拉并运行 |
 
 判据分四层，独立性递增：
@@ -564,7 +660,7 @@ python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑
 2. **真实 profile**：Windows 系统自带的 3 个真实 profile（matrix/TRC 型 sRGB、
    真实显示器、CMYK/LUT 打印机），外加 Little-CMS 测试套件里的 ICC v4 profile
    `test4.icc`（覆盖 `mAB ` / `mBA `，来源与许可见 `testdata/README.md`）；
-3. **外部 oracle**：六个来源——
+3. **外部 oracle**：七个来源——
    - `tools/diff_oracle.py`：Python `struct` **独立**按规范解析并**独立重做** matrix/TRC 变换，与本库逐字段、逐样本比对；并对 v4 的 `mAB `/`mBA ` 做独立结构对拍（网格、精度、各段曲线条数、矩阵项数）；
    - `link_golden_wbtest.mbt`：lcms2 生成的 4096 个彩色样本金标（matrix/TRC → matrix/TRC）；
    - `clut_golden_wbtest.mbt`：625 个 CLUT 网格节点 + 300 个 lcms2 CMYK 样本；
@@ -572,6 +668,7 @@ python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑
    - `intent_golden_wbtest.mbt`：lcms2 生成的四种渲染意图金标（200 个随机 RGB 样本，四意图共用输入）；
    - `v4lut_golden_wbtest.mbt`：lcms2 生成的 v4 LUT 金标（`A2B0`/`A2B1`/`B2A0`/`B2A1` × 40 样本）；
    - `xyz_lut_golden_wbtest.mbt`：lcms2 生成的合成 XYZ-PCS profile 金标（`RGB→LAB` 与 `RGB→RGB` 各 26 样本）；
+   - `proof_golden_wbtest.mbt`：**C 版 lcms2** 生成的软打样金标。Pillow 不暴露 proofing 接口，因此 `tools/gen_proof_golden.py` 用 MSYS2 gcc 编译 `_research` 下的 Little-CMS 源码，调用 `cmsCreateProofingTransform`（`SOFTPROOFING | NOOPTIMIZE`）；
 4. **网格节点**：CLUT 节点值不依赖插值细节，任何正确实现在节点上都必须
    返回存储值。这一层单独钉住**解析、索引步长、Lab 解码**；
    `v4lut_wbtest.mbt` 里还有一条同类的 v4 节点判据。
@@ -588,7 +685,12 @@ python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑
   - sRGB → CMYK：完全一致 **297/300（99%）**，最大偏差 ≤ 2 级；
   - CMYK → sRGB：完全一致 173、差 1 级 125、差 2 级 2，最大偏差 2 级。
 - 渲染意图对 lcms2（200 个随机样本，8 位域）：感知 / 相对比色 / 饱和度
-  三种意图**最大偏差 ≤ 2 级、一致率 ≥ 60%**；绝对比色见上文「已知限制」。
+  三种意图**最大偏差 ≤ 2 级、一致率 ≥ 60%**；**绝对比色 197/200 完全一致、
+  最大偏差 1 级**。
+- 软打样对 lcms2 `cmsCreateProofingTransform`（16 个灰阶样本，8 位域）：
+  相对/相对 7/16 完全一致、相对/绝对打样 9/16，**两者最大偏差均为 1 级**。
+- 色域判断（sRGB → CMYK 打印机）：中性轴基线 4.47 ΔE，自适应容差 5.59；
+  灰阶与纸白判 in，纯黑（ΔE 12.88）与 sRGB 原色（12.48–103.12）判 out。
 - ICC v4 LUT 对 lcms2（`test4.icc`，40 个样本，8 位域）：`A2B0` 与 `A2B1` 均
   **40/40 完全一致（偏差 0）**，`B2A0` 38/40、`B2A1` 39/40，最大偏差 1 级。
 - PCS 为 `XYZ ` 的 LUT（合成 `xyz_lut.icc`，26 个样本，8 位域）：设备→PCS Lab 与
