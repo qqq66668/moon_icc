@@ -481,9 +481,13 @@ pub struct ColorTransform {
   destination : DestinationStage
   /// 渲染意图编号（0..3）。
   ///
-  /// 对 LUT 型 profile，意图在构造时就已体现为「选哪张表」；这里保留编号
-  /// 是为了让调用方能查询，并供未来实现绝对比色的 PCS 缩放使用。
+  /// 对 LUT 型 profile，意图在构造时就已体现为「选哪张表」；
+  /// 绝对比色（编号 3）额外的 PCS 缩放由 `pcs_scale` 承担。
   intent : Int32
+  /// 绝对比色在 PCS XYZ 上的各分量缩放；其余意图恒为 (1,1,1)。
+  ///
+  /// 取 `diag(源媒体白点 / 目标媒体白点)`，见 `Profile::media_white_point`。
+  pcs_scale : XyzNumber
 }
 
 ///|
@@ -555,6 +559,29 @@ pub fn Profile::has_lut(self : Profile) -> Bool {
 }
 
 ///|
+/// 媒体白点——绝对比色的缩放基准。
+///
+/// 语义对齐 lcms2 的 `_cmsReadMediaWhitePoint`（`src/cmsio1.c:64`）：
+///
+/// - 没有 `wtpt` tag → D50；
+/// - **v2 且设备类为 `mntr`** → D50：这类老显示器 profile 的 `wtpt` 记的是
+///   器件白（D65），而它的矩阵列**已经**适应到 D50。拿 D65 当媒体白点会让
+///   绝对比色的 Z 分量多乘约 1.32 倍——这正是本库上一版绝对比色
+///   「偏差反而从 20 级恶化到 107 级」的根因；
+/// - 其余取 `wtpt` 原值（例如 CMYK 打印机记的是纸张白，显著低于 D50）。
+///
+/// 绝对比色的缩放是 `diag(源白点 / 目标白点)`，见 `ColorTransform`。
+pub fn Profile::media_white_point(self : Profile) -> XyzNumber raise IccError {
+  if self.is_v2() && self.header.device_class == "mntr" {
+    return d50_white
+  }
+  match self.find_tag("wtpt") {
+    None => d50_white
+    Some(entry) => parse_xyz_tag(self.data, entry)
+  }
+}
+
+///|
 /// 由 profile 与表构造 LUT 型一侧的上下文。
 fn lut_stage(profile : Profile, table : LutTable) -> LutStage {
   {
@@ -620,7 +647,7 @@ pub fn ColorTransform::new(
 /// | 0 | 感知 | 用 `A2B0`/`B2A0` |
 /// | 1 | 媒体相对比色 | 用 `A2B1`/`B2A1` |
 /// | 2 | 饱和度 | 用 `A2B2`/`B2A2` |
-/// | 3 | 绝对比色 | 同 1（**已知限制**，见下） |
+/// | 3 | 绝对比色 | 用 `A2B1`/`B2A1`，**外加 PCS 白点缩放** |
 ///
 /// **matrix/TRC 型 profile 四种意图等价**：这类 profile 只有一组矩阵与曲线，
 /// 没有按意图分开的数据。这不是本库的省略——实测 lcms2 对
@@ -628,18 +655,28 @@ pub fn ColorTransform::new(
 /// （见 `tools/lcms2_intent_check.py`）。
 ///
 /// 反之对含多个 LUT 的 profile（如本机 CMYK 打印机），意图确实可区分：
-/// 实测以媒体相对比色为基准，感知差 35 级、饱和度差 255 级、绝对差 20 级。
+/// 实测以媒体相对比色为基准，感知差 35 级、饱和度差 255 级。
 ///
-/// ## 绝对比色（编号 3）为什么与 1 相同
+/// ## 绝对比色（编号 3）的 PCS 缩放
 ///
-/// 绝对比色需要在 PCS 上做白点缩放。本项目尝试过
-/// 「源侧乘 `wtpt/D50`、目标侧乘 `D50/wtpt`」这一标准形式，实测与 lcms2 的
-/// 偏差从 20 级**恶化到 107 级**，说明该形式与参考实现的实际语义不符。
+/// 绝对比色**不做白点适应**：它要求源的白点在目标上仍按绝对值呈现。
+/// 在 ICC 的 D50 相对 PCS 上，这等价于在两个阶段之间乘一个对角缩放
 ///
-/// 由于无法从可用材料确定参考实现的绝对比色语义，本库**不实现**它，
-/// 而是让编号 3 走与相对比色相同的路径（与 lcms2 的差异 ≤ 20 级），
-/// 并在 README 的「明确不做」中如实记录。发布一个会把结果改坏的猜测实现，
-/// 比承认这项限制更糟。
+/// ```text
+/// scale = diag(源媒体白点 / 目标媒体白点)
+/// ```
+///
+/// 与 lcms2 的 `ComputeConversion`（`src/cmscnvrt.c:352`，`AdaptationState = 1`
+/// 即默认的 V4 行为）逐项一致；白点按 `Profile::media_white_point` 取
+/// （v2 的 `mntr` 类按 D50 处理，这是 lcms2 的既定行为）。
+///
+/// 以本机测试 profile 为例：`srgb.icc` 是 v2 `mntr` → 白点按 D50；
+/// `cmyk_printer.icc` 是 v2 `prtr`、`wtpt` = (0.8617, 0.8933, 0.7431)
+/// → 缩放 ≈ (1.119, 1.119, 1.110)。所以这条链上**只有目标侧贡献差异**，
+/// 源侧缩放在 lcms2 语义下恰好是 1。
+///
+/// 上一版曾在源侧乘 `wtpt/D50`（用了 sRGB 标签里的 D65 而不是 D50），
+/// Z 分量被多乘约 1.32 倍，这才导致「偏差反而从 20 级恶化到 107 级」。
 ///
 /// 非法编号（负数或大于 3）会被拒绝，不静默回退到默认意图。
 pub fn ColorTransform::with_intent(
@@ -653,10 +690,23 @@ pub fn ColorTransform::with_intent(
       reason="渲染意图编号应在 0..3，实际 \{intent}",
     )
   }
+  // 绝对比色的 PCS 缩放要在构造两侧之前算好（后面 profile 会被消费）。
+  let pcs_scale = if intent == 3 {
+    let src_white = source.media_white_point()
+    let dst_white = destination.media_white_point()
+    XyzNumber::new(
+      src_white.x / dst_white.x,
+      src_white.y / dst_white.y,
+      src_white.z / dst_white.z,
+    )
+  } else {
+    XyzNumber::new(1.0, 1.0, 1.0)
+  }
   {
     source: build_source(source, intent),
     destination: build_destination(destination, intent),
     intent,
+    pcs_scale,
   }
 }
 
@@ -754,17 +804,20 @@ fn DestinationStage::from_pcs(
 ///
 /// 输入按**源 profile 色空间**的通道顺序给出，输出按**目标 profile 色空间**
 /// 的通道顺序。例如 sRGB → CMYK 时输入 3 个值、输出 4 个值。
+///
+/// 中间在 PCS XYZ 上乘 `pcs_scale`：只有绝对比色（编号 3）不是 (1,1,1)，
+/// 其余意图这步是恒等变换。
 pub fn ColorTransform::transform_values(
   self : ColorTransform,
   inputs : Array[Double],
 ) -> Array[Double] {
-  // 注意：**不做**绝对比色的白点缩放。
-  //
-  // 曾按「源侧乘 wtpt/D50、目标侧乘 D50/wtpt」实现过，实测与 lcms2 的
-  // 偏差从 20 级**恶化到 107 级**，说明该公式与参考实现的绝对比色语义不符。
-  // 与其发布一个把结果改坏的猜测实现，不如维持与相对比色一致，
-  // 并把差异如实记录（见 README 的「明确不做」与 intent_wbtest.mbt）。
-  self.destination.from_pcs(self.source.to_pcs(inputs))
+  let pcs = self.source.to_pcs(inputs)
+  let scaled = XyzNumber::new(
+    pcs.x * self.pcs_scale.x,
+    pcs.y * self.pcs_scale.y,
+    pcs.z * self.pcs_scale.z,
+  )
+  self.destination.from_pcs(scaled)
 }
 
 ///|

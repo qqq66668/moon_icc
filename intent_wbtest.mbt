@@ -118,19 +118,33 @@ test "意图: 三种意图彼此可区分" {
 }
 
 ///|
-/// 绝对比色（编号 3）：**已知限制**——当前与媒体相对比色走同一路径。
+/// 绝对比色（编号 3）：在 PCS 上乘 `diag(源媒体白点 / 目标媒体白点)`。
 ///
-/// 绝对比色需要在 PCS 上做白点缩放。本项目尝试过
-/// 「源侧乘 `wtpt/D50`、目标侧乘 `D50/wtpt`」这一标准形式，
-/// 实测与 lcms2 的偏差从 20 级**恶化到 107 级**，说明该形式与参考实现的
-/// 实际语义不符。在无法确定参考语义的情况下，本库不实现它，
-/// 而是明确地让它等同相对比色，并把差异记录下来。
+/// 语义对齐 lcms2 的 `ComputeConversion`（`src/cmscnvrt.c:352`，`AdaptationState`
+/// 为默认的 1）：白点取 `_cmsReadMediaWhitePoint`（`src/cmsio1.c:64`）——
+/// **v2 的 `mntr` 类 profile 按 D50 处理**，其余取 `wtpt` 原值。
 ///
-/// 本测试因此断言两件事：
-/// 1. 编号 3 的输出与编号 1 **逐点相同**（这是当前设计，不是巧合）；
-/// 2. 它与 lcms2 的绝对比色差异有界（实测 ≤ 20 级），
-///    作为「差异有多大」的量化记录，而不是声称正确。
-test "意图: 绝对比色（3）当前等同相对比色（已知限制）" {
+/// 这组 profile 对（`srgb.icc` v2/mntr、`cmyk_printer.icc` v2/prtr）上，
+/// 源侧白点按 D50、目标侧白点 = (0.8617, 0.8933, 0.7431)，
+/// 因此缩放 ≈ (1.119, 1.119, 1.110)，**只有目标侧贡献差异**。
+///
+/// 上一版在源侧乘了标签里的 D65（而不是 D50），Z 分量多乘约 1.32 倍，
+/// 导致与 lcms2 的偏差从 20 级恶化到 107 级——本测试正是用来钉住这个教训。
+///
+/// 判据两面：
+/// 1. 与 lcms2 的绝对比色金标一致（偏差 ≤ 2 级、完全一致率 ≥ 60%）；
+/// 2. 与相对比色**必须不同**：缩放若没生效，两者会逐点相同。
+test "意图: 绝对比色（3）与 lcms2 一致，且区别于相对比色" {
+  let (exact, worst, worst_case) = compare_intent(3, intent_absolute)
+  if worst > 2 {
+    fail("绝对比色最大偏差 \{worst} 级超过 2: \{worst_case}")
+  }
+  if exact * 10 < intent_inputs.length() * 6 {
+    fail(
+      "绝对比色完全一致只有 \{exact}/\{intent_inputs.length()}，低于 60%",
+    )
+  }
+  // 缩放必须真的改变了结果：与相对比色逐点比较
   let absolute = intent_transform(3)
   let relative = intent_transform(1)
   let mut differs = 0
@@ -149,22 +163,9 @@ test "意图: 绝对比色（3）当前等同相对比色（已知限制）" {
       }
     }
   }
-  if differs > 0 {
+  if differs == 0 {
     fail(
-      "编号 3 与编号 1 的输出应当逐点相同，实际有 \{differs} 个分量不同",
-    )
-  }
-  // 量化记录与 lcms2 的绝对比色差多少（不是判据通过，而是记录限制的边界）
-  let (exact, worst, worst_case) = compare_intent(3, intent_absolute)
-  if worst > 30 {
-    fail(
-      "与 lcms2 绝对比色的偏差 \{worst} 级超出记录的 20 级上界: \{worst_case}",
-    )
-  }
-  // 这条信息性断言：完全一致率必然很低，因为确实没实现绝对比色
-  if exact == intent_inputs.length() {
-    fail(
-      "编号 3 竟然与 lcms2 的绝对比色完全一致，说明限制描述已过时",
+      "绝对比色与相对比色逐点相同，说明 PCS 白点缩放没有生效",
     )
   }
 }
