@@ -115,6 +115,99 @@ fn read_and_link(
 }
 
 ///|
+/// 软打样：源设备 → 打样设备 → 显示设备。
+///
+/// 每行 `proof <索引> | <打样设备值> | <显示设备值>`，均量化到 0..255。
+/// 前者说明「这张图印在目标设备上要用多少墨」，后者说明「屏幕上该显示成什么」。
+fn read_and_proof(
+  source_path : String,
+  proof_path : String,
+  display_path : String,
+  intent : Int32,
+  proof_intent : Int32,
+) -> Unit raise {
+  let chain = @moon_icc.ColorTransform::proofing(
+    @moon_icc.Profile::parse(@fs.read_file_to_bytes(source_path)),
+    @moon_icc.Profile::parse(@fs.read_file_to_bytes(proof_path)),
+    @moon_icc.Profile::parse(@fs.read_file_to_bytes(display_path)),
+    intent,
+    proof_intent,
+  )
+  println("intent \{intent}")
+  println("proof_intent \{proof_intent}")
+  println("proof_channels \{chain.proof_channels()}")
+  println("display_channels \{chain.display_channels()}")
+  for i = 0; i <= 255; i = i + 17 {
+    let v = i.to_double() / 255.0
+    let (proof_values, shown) = chain.evaluate([v, v, v])
+    let pb = StringBuilder()
+    for x in proof_values {
+      pb.write(" \{quantise8(x)}")
+    }
+    let sb = StringBuilder()
+    for x in shown {
+      sb.write(" \{quantise8(x)}")
+    }
+    println("proof \{i} |\{pb.to_string()} |\{sb.to_string()}")
+  }
+}
+
+///|
+/// 色域判断：源 profile 的样本能否被目标 profile 表达。
+///
+/// 每行 `gamut <索引> <R> <G> <B> de=<ΔE76> <in|out>`。
+/// 样本含 8 个 RGB 角点（暴露色域裁剪）与灰阶（确认中性色不误报）。
+fn read_and_gamut(
+  source_path : String,
+  target_path : String,
+  intent : Int32,
+) -> Unit raise {
+  let source = @moon_icc.Profile::parse(@fs.read_file_to_bytes(source_path))
+  let target = @moon_icc.Profile::parse(@fs.read_file_to_bytes(target_path))
+  println("intent \{intent}")
+  println("tolerance \{target.gamut_tolerance(intent)}")
+  let corners : Array[(Double, Double, Double)] = [
+    (0.0, 0.0, 0.0),
+    (1.0, 1.0, 1.0),
+    (1.0, 0.0, 0.0),
+    (0.0, 1.0, 0.0),
+    (0.0, 0.0, 1.0),
+    (0.0, 1.0, 1.0),
+    (1.0, 0.0, 1.0),
+    (1.0, 1.0, 0.0),
+  ]
+  let mut index = 0
+  for c in corners {
+    report_gamut(index, source, target, intent, c.0, c.1, c.2)
+    index = index + 1
+  }
+  for i = 0; i <= 255; i = i + 17 {
+    let v = i.to_double() / 255.0
+    report_gamut(index, source, target, intent, v, v, v)
+    index = index + 1
+  }
+}
+
+///|
+/// 单个样本的色域判定（供 `read_and_gamut` 调用）。
+fn report_gamut(
+  index : Int32,
+  source : @moon_icc.Profile,
+  target : @moon_icc.Profile,
+  intent : Int32,
+  r : Double,
+  g : Double,
+  b : Double,
+) -> Unit raise {
+  let xyz = source.device_to_pcs(intent, [r, g, b])
+  let de = target.round_trip_delta_e(intent, xyz)
+  let verdict = if target.in_gamut(intent, xyz) { "in" } else { "out" }
+  println(
+    "gamut \{index} \{quantise8(r)} \{quantise8(g)} \{quantise8(b)} de=\{de} \{verdict}",
+  )
+}
+
+///|
 /// 把意图名解析为编号；无法识别时返回 `None`（不静默回退）。
 fn parse_intent(name : String) -> Int32? {
   match name {
@@ -123,6 +216,38 @@ fn parse_intent(name : String) -> Int32? {
     "saturation" => Some(2)
     "absolute" => Some(3)
     _ => None
+  }
+}
+
+///|
+/// 取可选位置的意图参数：缺省返回 `default`，给了但无法识别则抛错。
+fn parse_optional_intent(
+  args : Array[String],
+  index : Int32,
+  default : Int32,
+) -> Int32? {
+  if index >= args.length() {
+    return Some(default)
+  }
+  parse_intent(args[index])
+}
+
+///|
+/// 取可选意图并在无法识别时打印提示；返回 `None` 表示应中止。
+fn required_intent(
+  args : Array[String],
+  index : Int32,
+  default : Int32,
+  what : String,
+) -> Int32? {
+  match parse_optional_intent(args, index, default) {
+    Some(v) => Some(v)
+    None => {
+      println(
+        "无法识别的\{what} \"\{args[index]}\"（可选: perceptual / relative / saturation / absolute）",
+      )
+      None
+    }
   }
 }
 
@@ -184,8 +309,10 @@ fn describe_lut(path : String) -> Unit raise {
 /// 入口：
 ///   `moon run cmd/main -- parse <profile 路径>`
 ///   `moon run cmd/main -- transform <profile 路径>`
-///   `moon run cmd/main -- link <源 profile> <目标 profile>`
+///   `moon run cmd/main -- link <源 profile> <目标 profile> [意图]`
 ///   `moon run cmd/main -- lut <LUT 型 profile 路径>`
+///   `moon run cmd/main -- proof <源> <打样> <显示> [意图] [打样意图]`
+///   `moon run cmd/main -- gamut <源 profile> <目标 profile> [意图]`
 ///
 /// 参数按关键词扫描而非固定下标：不同后端下 `moon run` 传给程序的
 /// argv 形状不同（js 后端会把脚本路径放进 argv），
@@ -193,7 +320,12 @@ fn describe_lut(path : String) -> Unit raise {
 fn main {
   let args = @env.args()
   let command_index = args.search_by(fn(a) {
-    a == "parse" || a == "transform" || a == "link" || a == "lut"
+    a == "parse" ||
+    a == "transform" ||
+    a == "link" ||
+    a == "lut" ||
+    a == "proof" ||
+    a == "gamut"
   })
   match command_index {
     None => {
@@ -204,14 +336,24 @@ fn main {
         "  moon run cmd/main -- link <源 profile> <目标 profile> [意图]",
       )
       println("  moon run cmd/main -- lut <LUT 型 profile 路径>")
+      println(
+        "  moon run cmd/main -- proof <源> <打样> <显示> [意图] [打样意图]",
+      )
+      println(
+        "  moon run cmd/main -- gamut <源 profile> <目标 profile> [意图]",
+      )
       println("")
       println("意图可选（默认 relative）:")
       println("  perceptual | relative | saturation | absolute")
     }
     Some(i) => {
       let command = args[i]
-      // link 需要两个路径，其余命令只需一个
-      let needed_paths = if command == "link" { 2 } else { 1 }
+      // 各命令需要的 profile 路径数不同
+      let needed_paths = match command {
+        "proof" => 3
+        "link" | "gamut" => 2
+        _ => 1
+      }
       if i + needed_paths >= args.length() {
         println("缺少 profile 路径参数")
         return
@@ -253,6 +395,35 @@ fn main {
           describe_lut(args[i + 1]) catch {
             e => println("LUT 求值失败: \{e}")
           }
+        "proof" => {
+          let intent = match required_intent(args, i + 4, 1, "意图") {
+            Some(v) => v
+            None => return
+          }
+          let proof_intent = match
+            required_intent(args, i + 5, 1, "打样意图") {
+            Some(v) => v
+            None => return
+          }
+          read_and_proof(
+            args[i + 1],
+            args[i + 2],
+            args[i + 3],
+            intent,
+            proof_intent,
+          ) catch {
+            e => println("打样失败: \{e}")
+          }
+        }
+        "gamut" => {
+          let intent = match required_intent(args, i + 3, 1, "意图") {
+            Some(v) => v
+            None => return
+          }
+          read_and_gamut(args[i + 1], args[i + 2], intent) catch {
+            e => println("色域判断失败: \{e}")
+          }
+        }
         _ => println("未知命令: \{command}")
       }
     }

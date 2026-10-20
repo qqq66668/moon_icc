@@ -711,6 +711,30 @@ pub fn ColorTransform::with_intent(
 }
 
 ///|
+/// 单 profile 的设备值 → PCS XYZ（统一入口）。
+///
+/// 与 `Profile::device_to_xyz` 的区别：那个只处理 LUT 型 profile，
+/// 这里按 profile 的实际类型自动选择 matrix/TRC 或 LUT 路径，
+/// 因此打样链、色域判断这类「只涉及一个 profile」的场景可以直接用。
+pub fn Profile::device_to_pcs(
+  self : Profile,
+  intent : Int32,
+  inputs : Array[Double],
+) -> XyzNumber raise IccError {
+  build_source(self, intent).to_pcs(inputs)
+}
+
+///|
+/// 单 profile 的 PCS XYZ → 设备值（统一入口）。
+pub fn Profile::pcs_to_device(
+  self : Profile,
+  intent : Int32,
+  xyz : XyzNumber,
+) -> Array[Double] raise IccError {
+  build_destination(self, intent).from_pcs(xyz)
+}
+
+///|
 /// 该变换使用的渲染意图编号。
 pub fn ColorTransform::intent(self : ColorTransform) -> Int32 {
   self.intent
