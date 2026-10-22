@@ -178,38 +178,57 @@ proof 51 | 13 17 16 224 | 61 60 59
 
 ### 色域判断（gamut check）
 
-判据：把颜色送进目标设备再送回来，看往返误差多大。
+判据是**几何色域边界**：只用「设备值产生的颜色」（按定义全在色域内）建边界，
+再判查询颜色是否落在边界内。
 
 ```moonbit
 let source = @moon_icc.Profile::parse(@fs.read_file_to_bytes("sRGB Color Space Profile.icc"))
 let target = @moon_icc.Profile::parse(@fs.read_file_to_bytes("printer.icc"))
 
-// 源设备值 → PCS XYZ（统一入口：matrix/TRC 型与 LUT 型 profile 都适用）
-let xyz = source.device_to_pcs(1, [ 0.0, 1.0, 0.0 ])   // sRGB 纯绿
-let de = target.round_trip_delta_e(1, xyz)             // 往返 ΔE76
-let inside = target.in_gamut(1, xyz)                   // 按自适应容差判定
-println(de)      // 55.83...
-println(inside)  // false —— SWOP CMYK 覆盖不了 sRGB 纯绿
+// 建边界：CMYK 用 9 层采样 = 6561 个设备值 → A2B → Lab
+let boundary = target.gamut_boundary(1, 9)
+println(boundary.samples())    // 6561
+println(boundary.coverage())   // 0.83...（CMYK 色域不填满 Lab 的所有方向）
+
+// 判一个颜色（sRGB 纯绿）
+let lab = @moon_icc.xyz_to_lab(source.device_to_pcs(1, [ 0.0, 1.0, 0.0 ]))
+println(boundary.contains(lab))          // false —— SWOP CMYK 覆盖不了
+println(boundary.signed_distance(lab))   // 18.70...（越界了多少，Lab 单位）
 ```
 
-阈值**按 profile 自适应**：取中性灰色的往返误差中位数（色域判定基线）再乘 1.25。
-原因是 CMYK 受 GCR 与总墨量限制，同一 profile 的 A2B 与 B2A 不严格互逆，
-中性灰本就有几个 ΔE 的底噪（本机 Agfa SWOP 约 4.5）；用固定阈值会把
-明明在色域内的灰阶误判成超色域。
+**为什么不用「往返 ΔE」判定**（本项目第一版的做法，已被证伪）：
 
-命令行：
+往返误差里混着**颜色映射误差**——同一个 profile 的 A2B 与 B2A 是两张独立的表，
+CMYK 还受 GCR 与总墨量限制，二者并不严格互逆。实测 1296 个 CMYK 设备值样本
+（按定义**全部在色域内**）：往返误差平均 6.78 ΔE、最大 19.73，用当时的自适应
+容差 5.59 判定会误判 **696/1296 = 53.7%**。改用几何边界后，同一类样本
+（边界 9 层、验证 7 层共 2401 个）误判 **0**。
+
+两者是不同的量，不要混用：
+
+| 指标 | 含义 | 用途 |
+|---|---|---|
+| `GamutBoundary::contains` / `signed_distance` | 到设备色域边界的几何位置 | **色域判定** |
+| `Profile::round_trip_delta_e` | A2B 与 B2A 的互逆程度 | 设备特性/打样质量的**映射误差**指标 |
+
+命令行（第 4 个参数是边界采样层数，默认 9）：
 
 ```
 moon run cmd/main --target wasm-gc -- gamut testdata/srgb.icc testdata/cmyk_printer.icc
 ```
 
 ```
-tolerance 5.591375629781349
-gamut 0 0 0 0 de=12.88 out      ← 纸张到不了 L*=0
-gamut 1 255 255 255 de=3.42 in  ← 纸白可表达
-gamut 3 0 255 0 de=55.83 out    ← SWOP CMYK 覆盖不了 sRGB 纯绿
-gamut 12 68 68 68 de=5.19 in    ← 中性灰在色域内
+sectors 16
+samples 6561
+coverage 0.83203125
+gamut 0 0 0 0 boundary=out dist=8.89 mapping_de=12.88     ← 纸到不了 L*=0
+gamut 1 255 255 255 boundary=out dist=50.00 mapping_de=3.42  ← 纸白只到 L*≈95
+gamut 3 0 255 0 boundary=out dist=18.70 mapping_de=55.83  ← SWOP 覆盖不了 sRGB 纯绿
 ```
+
+注意 `boundary` 与 `mapping_de` 刻意并列输出：前者是几何判定，
+后者是映射误差——以白色为例，它的映射误差只有 3.42，却**确实**超出纸白的
+几何边界（差 50 个 Lab 单位），两者结论不同正是它们本就不同的证明。
 
 ### 命令行示例
 
@@ -272,7 +291,7 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | `mAB` / `mBA`（ICC v4 LUT） | ✅ 已完成并验证 |
 | PCS 为 `XYZ ` 的 LUT 型 profile | ✅ 已完成并验证（v4 样本；v2 路径无样本，见「明确不做」） |
 | 软打样链（源 → 打样设备往返 → 显示器） | ✅ 已完成并验证（对 lcms2 proofing 最大偏差 1 级） |
-| 色域判断（往返 ΔE76 + 自适应容差） | ✅ 已完成并验证 |
+| 色域判断（几何色域边界：球面直方图） | ✅ 已完成并验证（设备值样本 0 误判；被证伪的往返 ΔE 法在同类样本上误判 53.7%） |
 
 ## CLUT 型 profile 变换
 
@@ -651,7 +670,7 @@ python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MS
 | 多 profile 链接（四种跨类型组合） | `cross_link_wbtest.mbt` + `cross_link_golden_wbtest.mbt`（sRGB ↔ CMYK 各 300 样本） |
 | 渲染意图（感知 / 相对 / 饱和度 / 绝对） | `intent_wbtest.mbt` + `intent_golden_wbtest.mbt`（200 样本 × 四意图）；绝对比色另断言「与相对比色必须不同」以防缩放失效 |
 | 软打样链 | `proofing_wbtest.mbt`（自洽性 + 物理正确性）+ `proof_golden_wbtest.mbt`（lcms2 `cmsCreateProofingTransform` 金标，最大偏差 1 级） |
-| 色域判断 | `proofing_wbtest.mbt`（中性轴基线、灰/白 in、黑与原色 out、判定与 ΔE 自洽） |
+| 色域判断 | `proofing_wbtest.mbt`（设备值样本零误判、纸白与设备黑 in、PCS 黑与原色 out、覆盖率、映射误差独立性） |
 | 命令行示例与端到端可用性 | `cmd/main` 四子命令；`tools/verify_publish.py` 在仓库之外的空工程里 `moon add` 实拉并运行 |
 
 判据分四层，独立性递增：
@@ -689,8 +708,11 @@ python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MS
   最大偏差 1 级**。
 - 软打样对 lcms2 `cmsCreateProofingTransform`（16 个灰阶样本，8 位域）：
   相对/相对 7/16 完全一致、相对/绝对打样 9/16，**两者最大偏差均为 1 级**。
-- 色域判断（sRGB → CMYK 打印机）：中性轴基线 4.47 ΔE，自适应容差 5.59；
-  灰阶与纸白判 in，纯黑（ΔE 12.88）与 sRGB 原色（12.48–103.12）判 out。
+- 色域判断（sRGB → CMYK 打印机，几何边界）：
+  - 设备值样本（边界 9 层、验证 7 层，2401 个）误判 **0**；
+    旧往返 ΔE 法在 1296 个同类样本上误判 **696（53.7%）**，平均映射误差 6.78、最大 19.73；
+  - 纸白与「设备能产生的最深黑」判 in；PCS 纯黑（L*=0）与 sRGB 纯绿/纯蓝判 out；
+  - 边界采样覆盖率 0.83（CMYK 色域不填满 Lab 的所有方向）。
 - ICC v4 LUT 对 lcms2（`test4.icc`，40 个样本，8 位域）：`A2B0` 与 `A2B1` 均
   **40/40 完全一致（偏差 0）**，`B2A0` 38/40、`B2A1` 39/40，最大偏差 1 级。
 - PCS 为 `XYZ ` 的 LUT（合成 `xyz_lut.icc`，26 个样本，8 位域）：设备→PCS Lab 与
