@@ -622,6 +622,19 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 - **黑点补偿（BPC）**：不做。软打样链与色域判断已完成；BPC 是相对比色之上的可选项，
   其黑点检测依赖 lcms2 那样的迭代反查，本库尚未实现，测试中也不声称支持。
 
+## 一致性与标准覆盖
+
+目标规范、设备类覆盖矩阵、各类必需行为、明确不做项与已知边界，见
+**[CONFORMANCE.md](CONFORMANCE.md)**。可用命令自查：
+
+```
+moon run cmd/main --target wasm-gc -- conformance
+moon run cmd/main --target wasm-gc -- conformance testdata/cmyk_printer.icc
+```
+
+覆盖矩阵是三态：`已验证`（有真实样本 + 测试）/ `部分`（入口已实现、缺样本）/
+`不支持`（并给出理由）。必需 tag 的检查是可执行的，不是文档里的一句话。
+
 ## 设计要点
 
 ### 外部不可信输入
@@ -644,7 +657,7 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 85 项测试
+moon test --target wasm-gc     # 90 项测试
 moon test --target js          # 同一套测试，js 后端
 moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
@@ -652,6 +665,7 @@ python tools/diff_oracle.py js         # 同上，js 后端
 python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
 python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑并核对其中公布的数值
 python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MSYS2 gcc 编译 lcms2）
+moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版本与必需行为）
 ```
 
 > `check_readme_examples.py` 与 `verify_publish.py` **不放进 CI 的 push 门禁**：
