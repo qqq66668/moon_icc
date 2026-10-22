@@ -661,7 +661,7 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 90 项测试
+moon test --target wasm-gc     # 93 项测试
 moon test --target js          # 同一套测试，js 后端
 moon test --target native      # 同一套测试，native 后端
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
@@ -669,6 +669,7 @@ python tools/diff_oracle.py js         # 同上，js 后端
 python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
 python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑并核对其中公布的数值
 python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MSYS2 gcc 编译 lcms2）
+python tools/gen_abst_link_profiles.py # 重新生成 abst / link 合成样本（生成时用 lcms2 复核）
 # 判据有效性（刻意植入错误看测试是否变红）见 MUTATION.md
 moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版本与必需行为）
 ```
@@ -690,6 +691,7 @@ moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版
 | 渲染意图（感知 / 相对 / 饱和度 / 绝对） | `intent_wbtest.mbt` + `intent_golden_wbtest.mbt`（200 样本 × 四意图）；绝对比色另断言「与相对比色必须不同」以防缩放失效 |
 | 软打样链 | `proofing_wbtest.mbt`（自洽性 + 物理正确性）+ `proof_golden_wbtest.mbt`（lcms2 `cmsCreateProofingTransform` 金标，最大偏差 1 级） |
 | 色域判断 | `proofing_wbtest.mbt`（设备值样本零误判、纸白与设备黑 in、PCS 黑与原色 out、覆盖率、映射误差独立性） |
+| 抽象 profile（`abst`）与 device link（`link`） | `abstract_link_wbtest.mbt`（恒等抽象不改变 PCS；device link 等于闭式 C=1-R, M=1-G, Y=1-B, K=0）|
 | 命令行示例与端到端可用性 | `cmd/main` 四子命令；`tools/verify_publish.py` 在仓库之外的空工程里 `moon add` 实拉并运行 |
 
 判据分四层，独立性递增：

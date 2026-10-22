@@ -61,9 +61,9 @@ test "一致性: 覆盖矩阵列出全部设备类" {
       fail("\{r.0} 没有给出边界说明")
     }
   }
-  // 4 类有真实样本验证；abst/link 实现了但缺样本；nmcl 不做
-  inspect(verified, content="4")
-  inspect(partial, content="2")
+  // 6 类已验证（abst/link 用合成样本 + 解析式判据）；nmcl 不做
+  inspect(verified, content="6")
+  inspect(partial, content="0")
   inspect(unsupported, content="1")
 }
 
