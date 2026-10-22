@@ -217,6 +217,34 @@ fn report_gamut(
 }
 
 ///|
+/// 一致性检查：打印目标规范版本、覆盖矩阵，并（给了路径时）检查一个 profile。
+///
+/// 这是把「标准版本与必需行为的覆盖目标」落成**可执行**的形式：
+/// 每个 profile 类的必需 tag 会被实际检查，缺失项直接列出。
+fn read_and_conformance(path : String?) -> Unit raise {
+  println("target_spec \{@moon_icc.target_specification}")
+  match path {
+    Some(p) => {
+      let profile = @moon_icc.Profile::parse(@fs.read_file_to_bytes(p))
+      let report = profile.conformance()
+      println("class \{report.device_class()}")
+      println("version \{report.version()}")
+      println("transform_supported \{report.transform_supported()}")
+      println("missing_required_tags \{report.missing().length()}")
+      for m in report.missing() {
+        println("  missing_tag \{m}")
+      }
+      println("note \{report.note()}")
+    }
+    None => ()
+  }
+  println("--- 设备类覆盖矩阵 ---")
+  for row in @moon_icc.conformance_matrix() {
+    println("\{row.0}  \{row.1}  \{row.2}")
+  }
+}
+
+///|
 /// 把意图名解析为编号；无法识别时返回 `None`（不静默回退）。
 fn parse_intent(name : String) -> Int32? {
   match name {
@@ -334,7 +362,8 @@ fn main {
     a == "link" ||
     a == "lut" ||
     a == "proof" ||
-    a == "gamut"
+    a == "gamut" ||
+    a == "conformance"
   })
   match command_index {
     None => {
@@ -345,6 +374,7 @@ fn main {
         "  moon run cmd/main -- link <源 profile> <目标 profile> [意图]",
       )
       println("  moon run cmd/main -- lut <LUT 型 profile 路径>")
+      println("  moon run cmd/main -- conformance [profile 路径]")
       println(
         "  moon run cmd/main -- proof <源> <打样> <显示> [意图] [打样意图]",
       )
@@ -361,6 +391,7 @@ fn main {
       let needed_paths = match command {
         "proof" => 3
         "link" | "gamut" => 2
+        "conformance" => 0
         _ => 1
       }
       if i + needed_paths >= args.length() {
@@ -422,6 +453,16 @@ fn main {
             proof_intent,
           ) catch {
             e => println("打样失败: \{e}")
+          }
+        }
+        "conformance" => {
+          let path = if i + 1 < args.length() {
+            Some(args[i + 1])
+          } else {
+            None
+          }
+          read_and_conformance(path) catch {
+            e => println("一致性检查失败: \{e}")
           }
         }
         "gamut" => {
