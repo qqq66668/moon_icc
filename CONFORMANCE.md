@@ -8,7 +8,7 @@
 ```bash
 moon run cmd/main --target wasm-gc -- conformance                 # 打印覆盖矩阵
 moon run cmd/main --target wasm-gc -- conformance testdata/xxx.icc # 检查单个 profile 的必需 tag
-moon test --target wasm-gc                                        # 90 项测试
+moon test --target wasm-gc                                        # 93 项测试
 ```
 
 ## 1. 目标规范版本
@@ -30,8 +30,8 @@ moon test --target wasm-gc                                        # 90 项测试
 | `mntr` | 显示设备 | **已验证** | 设备 ↔ PCS（A2B/B2A；matrix/TRC 可逆） |
 | `prtr` | 输出设备 | **已验证** | PCS → 设备（B2A），并支持 A2B 用于打样链 |
 | `spac` | 工作空间 | **已验证** | 设备 ↔ PCS；matrix/TRC 与 LUT 两种都验证过 |
-| `abst` | 抽象 profile | **部分** | PCS → PCS 变换入口已实现（`Profile::apply_abstract`）；本机无该类真实样本，判据待补 |
-| `link` | 设备链接 | **部分** | 设备 → 设备入口已实现（`Profile::apply_device_link`）；同上 |
+| `abst` | 抽象 profile | **已验证** | PCS → PCS（`Profile::apply_abstract`）；**恒等**合成样本 + 解析式判据 |
+| `link` | 设备链接 | **已验证** | 设备 → 设备（`Profile::apply_device_link`）；RGB→CMYK **解析式**合成样本 + 判据 |
 | `nmcl` | 命名色 | **不支持** | 需要 `ncl2` 命名色查表，与"设备色彩变换"是两条路 |
 
 "已验证"的判据：仓库里有该类的**真实 profile**，且测试同时覆盖解析、变换与外部对拍
@@ -107,12 +107,14 @@ moon test --target wasm-gc                                        # 90 项测试
 | 软打样 | `proofing_wbtest.mbt` + `proof_golden_wbtest.mbt`（C 版 lcms2 金标） |
 | 色域判定 | `proofing_wbtest.mbt`（零误判、界内外分类、覆盖率、映射误差独立性） |
 | 必需 tag 与设备类矩阵 | `conformance_wbtest.mbt` |
+| `abst` / `link` | `abstract_link_wbtest.mbt`（恒等抽象不改变 PCS；device link 等于闭式 C=1-R…）|
 
 ## 6. 已知边界（诚实清单）
 
 1. **v2 `mft1`/`mft2` + `XYZ ` PCS**：代码路径共用同一解码器，但本机没有这种真实样本，
    因此没有单独判据；
-2. **`abst` / `link`**：变换入口已实现并有解析层判据，但没有真实样本对拍；
+2. **`abst` / `link`**：用**合成**样本验证（恒等抽象 + 解析式 device link），
+   并由生成脚本当场复核 lcms2 可读；仍**没有真实世界的该类 profile**；
 3. **`chad` tag**：绝对比色按 lcms2 的 `AdaptationState = 1` 语义只用 `wtpt`，
    不读 `chad`；这与参考实现默认行为一致，但不是"不完全适应"的实现；
 4. **BPC**：未实现（见第 4 节）。

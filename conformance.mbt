@@ -110,11 +110,11 @@ fn class_support(device_class : String) -> (String, String) {
       )
     "abst" =>
       (
-        "部分", "PCS → PCS 的变换入口已实现；本机无该类真实样本，判据待补",
+        "已验证", "PCS → PCS；恒等合成样本 + 解析式判据（lcms2 可读）",
       )
     "link" =>
       (
-        "部分", "设备 → 设备的变换入口已实现；本机无该类真实样本，判据待补",
+        "已验证", "设备 → 设备；RGB→CMYK 解析式合成样本（lcms2 可读）",
       )
     "nmcl" =>
       (
