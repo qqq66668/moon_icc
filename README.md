@@ -220,15 +220,16 @@ moon run cmd/main --target wasm-gc -- gamut testdata/srgb.icc testdata/cmyk_prin
 ```
 sectors 16
 samples 6561
-coverage 0.83203125
-gamut 0 0 0 0 boundary=out dist=8.89 mapping_de=12.88     ← 纸到不了 L*=0
-gamut 1 255 255 255 boundary=out dist=50.00 mapping_de=3.42  ← 纸白只到 L*≈95
+coverage 0.94140625
+gamut 0 0 0 0 boundary=out dist=8.59 mapping_de=12.88     ← 纸到不了 L*=0
+gamut 1 255 255 255 boundary=out dist=5.69 mapping_de=3.42   ← 超出纸白边界
 gamut 3 0 255 0 boundary=out dist=18.70 mapping_de=55.83  ← SWOP 覆盖不了 sRGB 纯绿
 ```
 
-注意 `boundary` 与 `mapping_de` 刻意并列输出：前者是几何判定，
-后者是映射误差——以白色为例，它的映射误差只有 3.42，却**确实**超出纸白的
-几何边界（差 50 个 Lab 单位），两者结论不同正是它们本就不同的证明。
+注意 `boundary` 与 `mapping_de` 刻意并列输出：前者是几何判定，后者是映射误差。
+两者的结论可以相反——中性灰 34（`gamut 10`）映射误差 3.47 却**在色域内**（距边界 5.70），
+而 sRGB 纯白映射误差只有 3.42 却**超出**纸白边界 5.69。判据有效性的证据见
+[MUTATION.md](MUTATION.md)。
 
 ### 命令行示例
 
@@ -665,6 +666,7 @@ python tools/diff_oracle.py js         # 同上，js 后端
 python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
 python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑并核对其中公布的数值
 python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MSYS2 gcc 编译 lcms2）
+# 判据有效性（刻意植入错误看测试是否变红）见 MUTATION.md
 moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版本与必需行为）
 ```
 
@@ -726,7 +728,7 @@ moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版
   - 设备值样本（边界 9 层、验证 7 层，2401 个）误判 **0**；
     旧往返 ΔE 法在 1296 个同类样本上误判 **696（53.7%）**，平均映射误差 6.78、最大 19.73；
   - 纸白与「设备能产生的最深黑」判 in；PCS 纯黑（L*=0）与 sRGB 纯绿/纯蓝判 out；
-  - 边界采样覆盖率 0.83（CMYK 色域不填满 Lab 的所有方向）。
+  - 边界采样覆盖率 0.94（9 层采样；CMYK 色域不填满 Lab 的所有方向）。
 - ICC v4 LUT 对 lcms2（`test4.icc`，40 个样本，8 位域）：`A2B0` 与 `A2B1` 均
   **40/40 完全一致（偏差 0）**，`B2A0` 38/40、`B2A1` 39/40，最大偏差 1 级。
 - PCS 为 `XYZ ` 的 LUT（合成 `xyz_lut.icc`，26 个样本，8 位域）：设备→PCS Lab 与
