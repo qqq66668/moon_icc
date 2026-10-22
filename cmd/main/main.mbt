@@ -155,17 +155,23 @@ fn read_and_proof(
 ///|
 /// 色域判断：源 profile 的样本能否被目标 profile 表达。
 ///
-/// 每行 `gamut <索引> <R> <G> <B> de=<ΔE76> <in|out>`。
-/// 样本含 8 个 RGB 角点（暴露色域裁剪）与灰阶（确认中性色不误报）。
+/// 判据是**几何色域边界**（球面直方图，见 gamut.mbt），不是往返 ΔE：
+/// 每行 `gamut <索引> R G B boundary=<in|out> dist=<ΔE量级> mapping_de=<ΔE76>`。
+/// 后两项刻意并列输出——`dist` 是到边界的距离，`mapping_de` 是该 profile
+/// A2B/B2A 不互逆造成的映射误差，两者是不同的量。
 fn read_and_gamut(
   source_path : String,
   target_path : String,
   intent : Int32,
+  steps : Int32,
 ) -> Unit raise {
   let source = @moon_icc.Profile::parse(@fs.read_file_to_bytes(source_path))
   let target = @moon_icc.Profile::parse(@fs.read_file_to_bytes(target_path))
+  let boundary = target.gamut_boundary(intent, steps)
   println("intent \{intent}")
-  println("tolerance \{target.gamut_tolerance(intent)}")
+  println("sectors \{boundary.sectors()}")
+  println("samples \{boundary.samples()}")
+  println("coverage \{boundary.coverage()}")
   let corners : Array[(Double, Double, Double)] = [
     (0.0, 0.0, 0.0),
     (1.0, 1.0, 1.0),
@@ -178,12 +184,12 @@ fn read_and_gamut(
   ]
   let mut index = 0
   for c in corners {
-    report_gamut(index, source, target, intent, c.0, c.1, c.2)
+    report_gamut(index, source, target, boundary, intent, c.0, c.1, c.2)
     index = index + 1
   }
   for i = 0; i <= 255; i = i + 17 {
     let v = i.to_double() / 255.0
-    report_gamut(index, source, target, intent, v, v, v)
+    report_gamut(index, source, target, boundary, intent, v, v, v)
     index = index + 1
   }
 }
@@ -194,16 +200,19 @@ fn report_gamut(
   index : Int32,
   source : @moon_icc.Profile,
   target : @moon_icc.Profile,
+  boundary : @moon_icc.GamutBoundary,
   intent : Int32,
   r : Double,
   g : Double,
   b : Double,
 ) -> Unit raise {
   let xyz = source.device_to_pcs(intent, [r, g, b])
+  let lab = @moon_icc.xyz_to_lab(xyz)
   let de = target.round_trip_delta_e(intent, xyz)
-  let verdict = if target.in_gamut(intent, xyz) { "in" } else { "out" }
+  let dist = boundary.signed_distance(lab)
+  let verdict = if boundary.contains(lab) { "in" } else { "out" }
   println(
-    "gamut \{index} \{quantise8(r)} \{quantise8(g)} \{quantise8(b)} de=\{de} \{verdict}",
+    "gamut \{index} \{quantise8(r)} \{quantise8(g)} \{quantise8(b)} boundary=\{verdict} dist=\{dist} mapping_de=\{de}",
   )
 }
 
@@ -420,7 +429,21 @@ fn main {
             Some(v) => v
             None => return
           }
-          read_and_gamut(args[i + 1], args[i + 2], intent) catch {
+          // 采样层数是可选的第 4 个参数（默认 9：CMYK 得 6561 个样本）
+          let steps = if i + 4 < args.length() {
+            match @moon_icc.parse_steps(args[i + 4]) {
+              Some(v) => v
+              None => {
+                println(
+                  "采样层数应为 2..12 的整数，实际 \"\{args[i + 4]}\"",
+                )
+                return
+              }
+            }
+          } else {
+            9
+          }
+          read_and_gamut(args[i + 1], args[i + 2], intent, steps) catch {
             e => println("色域判断失败: \{e}")
           }
         }
