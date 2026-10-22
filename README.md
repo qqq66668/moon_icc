@@ -636,6 +636,9 @@ moon run cmd/main --target wasm-gc -- conformance testdata/cmyk_printer.icc
 覆盖矩阵是三态：`已验证`（有真实样本 + 测试）/ `部分`（入口已实现、缺样本）/
 `不支持`（并给出理由）。必需 tag 的检查是可执行的，不是文档里的一句话。
 
+与 mooncakes 上现有色彩包的**对照实验**（同一份 profile、可复现命令）见
+**[COMPARISON.md](COMPARISON.md)**。
+
 ## 设计要点
 
 ### 外部不可信输入
