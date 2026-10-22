@@ -118,3 +118,13 @@ moon test --target wasm-gc                                        # 93 项测试
 3. **`chad` tag**：绝对比色按 lcms2 的 `AdaptationState = 1` 语义只用 `wtpt`，
    不读 `chad`；这与参考实现默认行为一致，但不是"不完全适应"的实现；
 4. **BPC**：未实现（见第 4 节）。
+
+5. **色域判定的外部 oracle 未建立**：本轮尝试用 lcms2 的色域边界描述符 API
+   （`cmsGBDAlloc` / `cmsGDBAddPoint` / `cmsGDBCheckPoint`）对拍，**未能成立**：
+   实测把 CMYK 设备网格 9⁴ = 6561 个点全部 `cmsGDBAddPoint`（函数返回成功、
+   计数 6561），查询侧的 Lab 值也逐点核对正确（黑 `(0,0,0)`、白 `(100,0,0)`、
+   红 `(54.3,80.8,69.9)`），但 `cmsGDBCheckPoint` 对**全部 24 个查询（含中灰）**
+   都返回 `out`，与其自身语义矛盾。驱动源码见 `_research/lcms_probe/lcms2_gdb.c`。
+   因此色域判据目前的证据是**内部判据**：设备值样本 0 误判（2401 个）、
+   界内外分类（纸白/设备黑 in，PCS 黑与原色 out）、以及映射误差与几何判定的
+   独立性；**外部 oracle 待补**。
