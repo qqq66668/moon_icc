@@ -119,7 +119,7 @@ moon test --target wasm-gc                                        # 93 项测试
    并由生成脚本当场复核 lcms2 可读；仍**没有真实世界的该类 profile**；
 3. **`chad` tag**：绝对比色按 lcms2 的 `AdaptationState = 1` 语义只用 `wtpt`，
    不读 `chad`；这与参考实现默认行为一致，但不是"不完全适应"的实现；
-4. **BPC**：未实现（见第 4 节）。
+4. **BPC**：不做（见第 4 节）——它不是 ICC.1 的规范要求，属 CMM 扩展选项。
 
 5. **色域判定的外部 oracle**：lcms2 自带的色域边界描述符 API 不能作为 oracle
    （实测 `cmsGDBCheckPoint` 对全部 24 个查询、含中灰都返回 out，而其边界侧
