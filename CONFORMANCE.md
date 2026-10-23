@@ -91,7 +91,7 @@ moon test --target wasm-gc                                        # 93 项测试
 | 命名色（`nmcl`） | `ncl2` 是命名色→PCS 的查表，与设备色彩变换是两条路 |
 | iccMAX（ICC.2） | 架构不同（多 PCS、光谱、材质），需要独立设计 |
 | 色貌模型（CAM） | 超出 ICC PCS 范围；PCS 已隐含观察条件 |
-| 黑点补偿（BPC） | 其黑点检测需要迭代反查，尚未实现；文档与测试均不声称支持 |
+| 黑点补偿（BPC） | **不是 ICC.1 的规范要求**，属 CMM 扩展选项（Adobe/lcms2 的惯例做法）；本库不做，文档与测试均不声称支持 |
 | 图像容器读写（PNG/JPEG/TIFF） | 本库只处理色彩数值 |
 | 不完全色适应（`AdaptationState != 1`） | 与 lcms2 默认（`AdaptationState = 1`）保持一致；绝对比色只做白点缩放 |
 
