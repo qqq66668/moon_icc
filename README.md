@@ -670,6 +670,7 @@ python tools/verify_publish.py         # 在全新工程里实拉已发布包并
 python tools/check_readme_examples.py  # 把本文件的示例代码逐块实跑并核对其中公布的数值
 python tools/gen_proof_golden.py       # 重新生成软打样金标（需要 MSYS2 gcc 编译 lcms2）
 python tools/gen_abst_link_profiles.py # 重新生成 abst / link 合成样本（生成时用 lcms2 复核）
+python tools/compare_gamut.py          # 色域边界的独立对拍（lcms2 取 Lab + Python 重写，一致率 91.7%）
 # 判据有效性（刻意植入错误看测试是否变红）见 MUTATION.md
 moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版本与必需行为）
 ```
