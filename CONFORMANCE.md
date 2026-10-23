@@ -108,6 +108,7 @@ moon test --target wasm-gc                                        # 93 项测试
 | 色域判定 | `proofing_wbtest.mbt`（零误判、界内外分类、覆盖率、映射误差独立性） |
 | 必需 tag 与设备类矩阵 | `conformance_wbtest.mbt` |
 | `abst` / `link` | `abstract_link_wbtest.mbt`（恒等抽象不改变 PCS；device link 等于闭式 C=1-R…）|
+| 色域边界的独立交叉验证 | `tools/compare_gamut.py`（lcms2 取 Lab + Python 重写球面直方图，一致率 91.7%）|
 
 ## 6. 已知边界（诚实清单）
 
@@ -119,12 +120,11 @@ moon test --target wasm-gc                                        # 93 项测试
    不读 `chad`；这与参考实现默认行为一致，但不是"不完全适应"的实现；
 4. **BPC**：未实现（见第 4 节）。
 
-5. **色域判定的外部 oracle 未建立**：本轮尝试用 lcms2 的色域边界描述符 API
-   （`cmsGBDAlloc` / `cmsGDBAddPoint` / `cmsGDBCheckPoint`）对拍，**未能成立**：
-   实测把 CMYK 设备网格 9⁴ = 6561 个点全部 `cmsGDBAddPoint`（函数返回成功、
-   计数 6561），查询侧的 Lab 值也逐点核对正确（黑 `(0,0,0)`、白 `(100,0,0)`、
-   红 `(54.3,80.8,69.9)`），但 `cmsGDBCheckPoint` 对**全部 24 个查询（含中灰）**
-   都返回 `out`，与其自身语义矛盾。驱动源码见 `_research/lcms_probe/lcms2_gdb.c`。
-   因此色域判据目前的证据是**内部判据**：设备值样本 0 误判（2401 个）、
-   界内外分类（纸白/设备黑 in，PCS 黑与原色 out）、以及映射误差与几何判定的
-   独立性；**外部 oracle 待补**。
+5. **色域判定的外部 oracle**：lcms2 自带的色域边界描述符 API 不能作为 oracle
+   （实测 `cmsGDBCheckPoint` 对全部 24 个查询、含中灰都返回 out，而其边界侧
+   6561 个样本全部接受、查询 Lab 值逐点核对正确——驱动见
+   `_research/lcms_probe/lcms2_gdb.c`）。因此改用**独立第二实现**对拍：
+   `tools/compare_gamut.py` 用 **lcms2 的 Lab 值 + Python 重写的球面直方图**
+   与本库逐点比对，**一致率 91.7%（22/24）**；两处分歧是同一个颜色
+   （sRGB 纯白，作角点与灰阶各出现一次），且都落在边界 3 个 Lab 单位内。
+   结论：色域判据有独立交叉验证，但**没有与 CMM 内部算法逐位对拍的 oracle**。
