@@ -32,7 +32,7 @@ pub struct ConformanceReport {
   note : String
   /// profile 里 `A2B0-2` / `B2A0-2` 的实有张数（用于判断 v4 覆盖度）。
   lut_count : Int32
-  /// 本库对该设备类的支持水平：`已验证` / `部分` / `不支持`。
+  /// 本库对该设备类的状态：`本次实现` / `不作为目标`。
   support_level : String
 }
 
@@ -92,35 +92,38 @@ fn Profile::lut_inventory(self : Profile) -> Array[String] {
 }
 
 ///|
-/// 本库对该设备类的**支持水平**与边界说明。
+/// 本库对该设备类的**状态**与边界说明。
 ///
-/// 三态，刻意区分"实现了"和"有真实样本验证过"：
-/// - `已验证`：有真实 profile + 测试判据；
-/// - `部分`：变换入口已实现，但本机没有该类真实样本，判据待补；
-/// - `不支持`：本库不做，并给出理由。
+/// 只有两种状态，用词与申报书 / `CONFORMANCE.md` 完全一致，避免"暂不覆盖"
+/// 这类含义不明确的说法：
+/// - `本次实现`：属于本项目终点，已交付并有判据；
+/// - `不作为目标`：不属于本项目终点，并给出标准依据。
 fn class_support(device_class : String) -> (String, String) {
   match device_class {
-    "scnr" => ("已验证", "设备 → PCS（matrix/TRC 或 A2B LUT）")
-    "mntr" => ("已验证", "设备 ↔ PCS（A2B/B2A；matrix/TRC 可逆）")
+    "scnr" => ("本次实现", "设备 → PCS（matrix/TRC 或 A2B LUT）")
+    "mntr" =>
+      ("本次实现", "设备 ↔ PCS（A2B/B2A；matrix/TRC 可逆）")
     "prtr" =>
-      ("已验证", "PCS → 设备（B2A），并支持 A2B 用于打样链")
+      (
+        "本次实现", "PCS → 设备（B2A），并支持 A2B 用于打样链",
+      )
     "spac" =>
       (
-        "已验证", "设备 ↔ PCS（工作空间；matrix/TRC 与 LUT 两种都验证过）",
+        "本次实现", "设备 ↔ PCS（工作空间；matrix/TRC 与 LUT 两种都验证过）",
       )
     "abst" =>
       (
-        "已验证", "PCS → PCS；恒等合成样本 + 解析式判据（lcms2 可读）",
+        "本次实现", "PCS → PCS；恒等合成样本 + 解析式判据（lcms2 可读）",
       )
     "link" =>
       (
-        "已验证", "设备 → 设备；RGB→CMYK 解析式合成样本（lcms2 可读）",
+        "本次实现", "设备 → 设备；RGB→CMYK 解析式合成样本（lcms2 可读）",
       )
     "nmcl" =>
       (
-        "不支持", "命名色（ncl2）不做：本库面向设备色彩变换，不处理命名色查表",
+        "不作为目标", "命名色（ncl2）是「色名→PCS」查表，属色彩资产管理，不改变数值变换行为",
       )
-    _ => ("不支持", "未知设备类")
+    _ => ("不作为目标", "未知设备类")
   }
 }
 
@@ -170,7 +173,7 @@ pub fn Profile::conformance(self : Profile) -> ConformanceReport {
     version,
     required,
     missing,
-    transform_supported: level != "不支持",
+    transform_supported: level == "本次实现",
     note,
     lut_count: luts.length(),
     support_level: level,
@@ -234,7 +237,7 @@ pub fn conformance_matrix() -> Array[(String, String, String)] {
 }
 
 ///|
-/// 本库对该 profile 设备类的支持水平（`已验证` / `部分` / `不支持`）。
+/// 本库对该 profile 设备类的状态（`本次实现` / `不作为目标`）。
 pub fn ConformanceReport::support_level(self : ConformanceReport) -> String {
   self.support_level
 }
