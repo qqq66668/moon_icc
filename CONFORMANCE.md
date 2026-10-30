@@ -146,3 +146,18 @@ moon test --target wasm-gc                                        # 104 项测�
    与本库逐点比对，**一致率 91.7%（22/24）**；两处分歧是同一个颜色
    （sRGB 纯白，作角点与灰阶各出现一次），且都落在边界 3 个 Lab 单位内。
    结论：色域判据有独立交叉验证，但**没有与 CMM 内部算法逐位对拍的 oracle**。
+
+## 7. 数字复现命令
+
+对外材料（申报书 / README）里的每个数字都能用下列命令当场复现：
+
+| 数字 | 命令 |
+|---|---|
+| 测试用例数（104） | `moon test --target wasm-gc`、`moon test --target js` |
+| 门禁（fmt / check / build） | `moon fmt --check`、`moon check --target wasm-gc --deny-warn`、`moon build --target wasm-gc` |
+| 提交数 | `git rev-list --count HEAD` |
+| 版本号 | `moon.mod` 的 `version`，并与 `~/.moon/registry/index/user/qqq66668/moon_icc.index` 末行比对 |
+| 源码规模 | `git ls-files '*.mbt'` 后统计行数 |
+| lcms2 对拍数字（98.68% / 197-200 / 91.7%） | `tools/diff_oracle.py`、`tools/gen_intent_golden.py`、`tools/compare_gamut.py` |
+| 命名色 u16 对拍 5/5 | `python tools/gen_named_profile.py` 后按第 5 节表格复跑 |
+| 色域误判率（53.7% → 0） | `moon run cmd/main -- gamut` 与 `tools/compare_gamut.py` |
