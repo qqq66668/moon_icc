@@ -70,12 +70,47 @@ README 称其为 "lightweight ICC profile **inspector**"（检查器）。
 
 ## 结论（净贡献）
 
-1. **唯一同类包不能完成任何颜色变换**——它的 API 只产出元数据字符串；
+1. **同名同类包不能完成任何颜色变换**——它的 API 只产出元数据字符串；
 2. **它当前无法被使用**（包格式与语言语法两处都已过时），而本库可以在全新工程里
    `moon add` 后立刻跑出数值结果；
-3. 因此本库的净贡献不是"比它多一点功能"，而是**补上从 profile 到数值结果这一段**：
-   matrix/TRC 与 LUT 变换、跨类型链接（含 CMYK 四通道输出）、四种渲染意图、
-   软打样与色域判定——这些在 mooncakes 上此前没有任何 MoonBit 实现。
+3. 本库补上**从 profile 到数值结果这一段**：matrix/TRC 与 LUT 变换、跨类型链接
+   （含 CMYK 四通道输出）、四种渲染意图、软打样与色域判定。
+
+**更正（2026-10-30）**：本文件初版在结论第 3 条写过「这些在 mooncakes 上此前没有
+任何 MoonBit 实现」。该表述**不成立**——`moonbitlang/typst/moxcms` 已提供真实的
+ICC 解析与 LUT 变换。下面一节用可核查的方式给出与它的差异，替代那句断言。
+
+## 与 `moonbitlang/typst/moxcms` 的关系（2026-10-30 核查）
+
+核查方式：用 `gh api` 直读 `repos/moonbitlang/typst.mbt` 的源码与
+`moxcms/pkg.generated.mbti`（Apache-2.0；`moxcms/` 目录含 `profile.mbt` 1007 行、
+`reader.mbt` 903 行、`mab.mbt` 285 行、`lut_transforms.mbt` 297 行、
+`rgbxyz.mbt` 317 行、`tag.mbt` 148 行，另有独立 `pxfm/` 浮点数学子包与
+Rust oracle `moxcms/oracle/src/main.rs`）。
+
+**它确实做的事**（实质重叠，不回避）：ICC profile 解析、matrix/shaper 判定
+（`ColorProfile::is_matrix_shaper`）、`A2B*`/`B2A*` LUT 与 `mAB`/`mBA` 变换、
+8 位与 f32 两条执行器（`create_transform_8bit` / `create_transform_f32`）、
+RGB↔XYZ 矩阵、`RenderingIntent` 枚举、GAMUT tag 读取。
+
+**本次核查中未在其公开面看到的能力**（均为「未见」，不是「一定没有」）：
+
+| 能力 | 本项目 | `moxcms`（公开 API 与相关源码） |
+|---|---|---|
+| 命名色 `ncl2` 解析与色名→PCS 查表 | ✅ `Profile::named_colors()` / `lookup_lab()` | 未见：`pkg.generated.mbti` 的 19 个 `pub fn` 中无命名色入口；`tag.mbt` 的 tag 分派表只列 `A2B*`/`B2A*`/GAMUT |
+| 软打样链（源→打样→显示） | ✅ `ColorTransform::proofing` | 未见：`proof` 在 `profile.mbt`/`reader.mbt`/`tag.mbt`/`mab.mbt` 均无命中 |
+| 色域边界判定（含 3/4 通道设备） | ✅ `GamutBoundary` + 有符号距离 | 未见：`gamut` 仅作 `LutWarehouse` 字段承载 GAMUT tag，无边界查询 API |
+| `abst` / `link` 变换入口 | ✅ `apply_abstract` / `apply_device_link` | 未见：设备类枚举含 `Abstract`/`Named`，但无对应变换入口 |
+| 四种意图的逐样本 lcms2 金标对拍 | ✅ 200 样本 × 4 意图 | 未见公开对拍记录；其 oracle 是 Rust 实现 |
+| 定位 | 设备↔PCS 数值变换 + 色名查表 + 打样/色域 | 通用 CMS 内核（供 typst 排版链使用） |
+
+**差异陈述（不使用「生态空缺」这类无条件断言）**：两者在「解析 + LUT 变换」这一层
+重叠；本项目的可核查增量集中在命名色查表、软打样链、色域边界判定、`abst`/`link`
+入口，以及面向 lcms2 的逐样本对拍记录（`COMPARISON.md`、`CONFORMANCE.md`、
+`MUTATION.md`）。两者许可相同（Apache-2.0），本项目**未使用其任何源码**。
+
+**其他相关包**：`0717lee/moonav1` 的 `examples/color_video` 演示了「ICC 相对比色 +
+黑点补偿」的用法，属**下游使用者**而非 CMS 实现；`enanandesu/icc` 见上文。
 
 ## 复现方式
 

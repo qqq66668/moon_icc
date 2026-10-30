@@ -9,7 +9,7 @@
 | `srgb.icc` | `C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm` | `desc`＝"sRGB IEC61966-2.1"；`cprt`＝**"Copyright (c) 1998 Hewlett-Packard Company"** |
 | `display.icc` | 同上目录，由本机显示器的校色软件生成 | `cprt`＝"No copyright. Created with DisplayCAL 3.8.9.3 and ArgyllCMS 2.1.2"（**未主张版权**） |
 | `cmyk_printer.icc` | 同上目录的打印机 profile（v2.0，CMYK，PCS 为 Lab） | `desc`＝"Agfa : Swop Standard"；`cprt`＝**"Copyright (c) 2000 Microsoft Corporation"** |
-| `test4.icc` | [Little-CMS](https://github.com/mm2/Little-CMS) 仓库 `testbed/test4.icc` | Little-CMS 以 **MIT 许可**发布（声明全文见本文件末尾）；profile 自带 `desc`＝"Test profile, not suitable for real use" |
+| `test4.icc` | [Little-CMS](https://github.com/mm2/Little-CMS) 仓库 `testbed/test4.icc`，**pin 至 commit `3b7adc1a6cbd1001df6bf12612a5daaac790fa97`**（`master` 分支；该文件最后一次变更为 2011-05-26，此后内容未变） | Little-CMS 以 **MIT 许可**发布（声明全文见本文件末尾）；profile 自带 `desc`＝"Test profile, not suitable for real use" |
 | `xyz_lut.icc` | 本仓库合成，生成脚本 `tools/gen_xyz_lut_profile.py` | 本仓库自有产物，**无第三方版权** |
 | `named_lab.icc` | 本仓库合成，生成脚本 `tools/gen_named_profile.py` | 本仓库自有产物，**无第三方版权**（`nmcl` 类，PCS 为 `Lab `） |
 | `named_xyz.icc` | 同上 | 同上（PCS 为 `XYZ `，与 `named_lab.icc` 同一组色名与设备坐标） |
