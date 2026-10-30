@@ -12,7 +12,7 @@
 ```bash
 moon run cmd/main --target wasm-gc -- conformance                 # 打印覆盖矩阵
 moon run cmd/main --target wasm-gc -- conformance testdata/xxx.icc # 检查单个 profile 的必需 tag
-moon test --target wasm-gc                                        # 96 项测试
+moon test --target wasm-gc                                        # 104 项测试
 ```
 
 ## 1. 目标规范版本
@@ -34,7 +34,7 @@ moon test --target wasm-gc                                        # 96 项测试
 | `spac` | 工作空间 | **本次实现** | 设备 ↔ PCS；matrix/TRC 与 LUT 两种（`test4.icc` 即此类） |
 | `abst` | 抽象 profile | **本次实现** | PCS → PCS（`Profile::apply_abstract`）；**恒等**合成样本 + 解析式判据，lcms2 复核可读 |
 | `link` | 设备链接 | **本次实现** | 设备 → 设备（`Profile::apply_device_link`）；RGB→CMYK **解析式**合成样本 + 判据，lcms2 复核可读 |
-| `nmcl` | 命名色 | **不作为目标** | `ncl2` 是"色名→PCS"查表，属色彩资产管理，不改变任何数值变换行为；本库定位为设备↔PCS 数值色彩变换引擎 |
+| `nmcl` | 命名色 | **本次实现** | `ncl2` 全字段解析（vendorFlag/count/nDeviceCoords/prefix/suffix/rootName/PCS/设备坐标）+ 色名→PCS 查表（`Profile::named_colors()`）；合成样本 + lcms2 `cmsNamedColorInfo` 逐条 u16 对拍 5/5 |
 
 "本次实现"的含义：**属于本项目终点，已交付并有判据**（见第 5 节的对应表）。
 `conformance` 子命令会对你给的任何 profile 重新做一次必需 tag 检查。
@@ -46,8 +46,8 @@ moon test --target wasm-gc                                        # 96 项测试
 - 128 字节头部：9 个字段全部解析（版本、设备类、色空间、PCS、创建时间、
   `acsp` 签名、平台、标志、厂商/型号、渲染意图、PCS 照明体）；
 - tag 表：条目数、每条 `offset + size` 边界校验、乘法溢出检查；
-- **tag 数据体的解析范围**：本项目解析并使用 `XYZ `、`curv`、`para` 三类
-  （色彩变换只需要它们）。其余 tag（`desc`/`mluc`/`text`/`ncl2`/`mped` 等）
+- **tag 数据体的解析范围**：本项目解析并使用 `XYZ `、`curv`、`para`（色彩变换）
+  与 `ncl2`（命名色查表）四类。其余 tag（`desc`/`mluc`/`text`/`mped` 等）
   在 tag 表中**可见并可枚举**（签名、偏移、长度均校验），但不解析其内容；
 - 畸形输入返回结构化错误（`IccError` 六种）而不是 panic。
 
@@ -62,7 +62,7 @@ moon test --target wasm-gc                                        # 96 项测试
 | `prtr` | `desc`、`cprt`、`wtpt` | `A2B0 + B2A0` |
 | `abst` | `desc`、`cprt` | `A2B0` |
 | `link` | `desc`、`cprt` | `A2B0` |
-| `nmcl` | `desc`、`cprt`、`wtpt` | `ncl2`（本库不处理内容） |
+| `nmcl` | `desc`、`cprt`、`wtpt` | `ncl2`（已全字段解析） |
 
 本实现的简化，明确记录：只检查 tag **是否存在**，不检查 LUT 张数是否覆盖全部意图
 （v4 输出类规范上要求 `A2B0-2` 与 `B2A0-2` 共 6 张）；报告的备注里会给出实有张数。
@@ -96,7 +96,6 @@ moon test --target wasm-gc                                        # 96 项测试
 
 | 不作为目标 | 依据 |
 |---|---|
-| 命名色处理（`nmcl` 类、`ncl2` tag） | `ncl2` 是"色名 → PCS"查表，属色彩资产管理，不改变任何数值变换行为；本库定位为设备↔PCS 数值色彩变换引擎 |
 | **MPE 多处理元素变换（`mped`）** | MPE 是把 curve / matrix / lut 等元素串成链的**容器**。本库已实现其全部 constituent 元素的解码与求值（`curv`、`para`、矩阵、`mft1`/`mft2`、`mAB`/`mBA`），不提供任意元素链容器 |
 | 感知 / 饱和度意图的色域映射算法 | 映射结果由 profile 内 `A2B0`/`A2B2` 承载，本库忠实执行 LUT，不自造映射（与 lcms2 同） |
 | iccMAX（ICC.2） | 架构不同（多 PCS、光谱、材质），需要独立设计 |
@@ -119,6 +118,7 @@ moon test --target wasm-gc                                        # 96 项测试
 | 色域判定 | `proofing_wbtest.mbt`（零误判、界内外分类、覆盖率、映射误差独立性） |
 | 必需 tag 与设备类矩阵 | `conformance_wbtest.mbt` |
 | `abst` / `link` | `abstract_link_wbtest.mbt`（恒等抽象不改变 PCS；device link 等于闭式 C=1-R…）|
+| 命名色（`nmcl` / `ncl2`） | `named_color_wbtest.mbt`（全字段、完整色名、同根名首匹配、Lab/XYZ 双 PCS 一致、条目步长 304 字节、截断与错签名负例）；第三方对拍 lcms2 `cmsNamedColorInfo` 逐条 u16 **5/5 相同** |
 | 色域边界的独立交叉验证 | `tools/compare_gamut.py`（lcms2 取 Lab + Python 重写球面直方图，一致率 91.7%）|
 
 ## 6. 已知边界（诚实清单）
@@ -131,7 +131,14 @@ moon test --target wasm-gc                                        # 96 项测试
    不读 `chad`；这与参考实现默认行为一致，但不是"不完全适应"的实现；
 4. **BPC**：不做（见第 4 节）——它不是 ICC.1 的规范要求，属 CMM 扩展选项。
 
-5. **色域判定的外部 oracle**：lcms2 自带的色域边界描述符 API 不能作为 oracle
+5. **命名色（`nmcl`）**：`ncl2` 全字段解析与查表已交付，第三方对拍用 lcms2
+   `cmsNamedColorInfo`（PCS u16 与设备坐标逐条相同）；但夹具是**合成**样本
+   （`testdata/named_lab.icc` / `named_xyz.icc`），本机**没有真实世界的
+   `nmcl` 类 profile**。命名色 profile 提供的是「色名 → PCS」查表，不是设备↔PCS
+   数值变换，因此 `ConformanceReport::transform_supported()` 对它返回 `false`
+   ——这是有意的语义区分，不是缺口。
+
+6. **色域判定的外部 oracle**：lcms2 自带的色域边界描述符 API 不能作为 oracle
    （实测 `cmsGDBCheckPoint` 对全部 24 个查询、含中灰都返回 out，而其边界侧
    6561 个样本全部接受、查询 Lab 值逐点核对正确——驱动见
    `_research/lcms_probe/lcms2_gdb.c`）。因此改用**独立第二实现**对拍：

@@ -607,14 +607,55 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
 `(0.96428, 0.99997, 0.82509)`，与 D50 `(0.9642, 1.0, 0.8249)` 的色差 < 0.1；
 若误再加一次适应，白点会明显偏离。
 
+## 命名色（`nmcl` 类、`ncl2` tag）
+
+命名色 profile 的必需行为是「色名 → PCS」查表。本库解析 `ncl2`
+（`namedColor2Type`，ICC.1:2010-12 §10.14）的全部字段：
+
+| 字段 | 处理 |
+|---|---|
+| `vendorFlag` | 原样读出（`NamedColor2::vendor_flag()`） |
+| `count` | 条目数；上界检查用**除法**，避免 `count × 步长` 在 Int32 上溢出后绕过检查 |
+| `nDeviceCoords` | 每条附带的设备坐标个数，规范允许 0..8，超出报 `BadTagData` |
+| `prefix` / `suffix` | 32 字节 ASCII，去尾部 `0x00` |
+| `rootName` | 每条 32 字节 ASCII |
+| PCS | **3 × `uInt16Number`**（不是 `s15Fixed16Number`）：`Lab ` 按 v4 `0xFFFF` / v2 `0xFF00` 解码，`XYZ ` 按 `u1Fixed15`（1.0 = `0x8000`） |
+| 设备坐标 | `nDeviceCoords × u16` |
+
+**完整色名 = `prefix + rootName + suffix`**，查表走完整名：`PANTONE Red C` 命中，
+裸根名 `Red` 不命中——否则同根名、不同后缀的条目（`PANTONE Red C` / `PANTONE Red U`）
+无法区分。
+
+具体输入输出（`moon run cmd/main --target wasm-gc -- named testdata/named_lab.icc`）：
+
+```
+class nmcl
+pcs Lab 
+version 4
+vendor_flag 0
+n_device_coords 3
+prefix PANTONE 
+suffix  C
+count 5
+named 0 PANTONE Red C lab=54.0002 80.8016 69.8988 device=255 0 0
+named 3 PANTONE Gray C lab=50.0008 0 0 device=128 128 128
+lookup PANTONE Red C -> 54.0002 80.8016 69.8988
+lookup Red -> 未命中
+```
+
+同一组色名在 PCS 为 `XYZ ` 的 `testdata/named_xyz.icc` 上经 D50 换算出同一组 Lab
+（差异 < 0.1，来自 u16 量化）——这是跨编码空间的判据：把 XYZ 当 Lab 直读，Gray 会
+得到 `(0.1776, 0.1842, 0.1519)` 而不是 `(50, 0, 0)`，差两个数量级。
+
+夹具由 `tools/gen_named_profile.py` 确定性生成；第三方对拍用 lcms2
+`cmsNamedColorInfo`，5 条 × 两份 profile 的 PCS u16 与设备坐标**逐条相同**。
+
 ## 不作为目标（明确边界）
 
-本库的终点是「设备↔PCS 数值色彩变换」这条链路（见[当前进度](#当前进度)与
+本库的终点是「设备↔PCS 数值色彩变换 + 色名→PCS 查表」这条链路（见[当前进度](#当前进度)与
 [CONFORMANCE.md](CONFORMANCE.md) 的覆盖矩阵）。下列各项**不属于本项目目标**，
 不是"尚未实现的待办"；写在此处以免误用。
 
-- **命名色处理（`nmcl` 类、`ncl2` tag）**：`ncl2` 是"色名 → PCS"的查表，属色彩资产
-  管理，不改变任何数值变换行为。本库定位为设备↔PCS 数值色彩变换引擎，不做色名查表。
 - **MPE 多处理元素变换（`mped`）**：MPE 是把 curve / matrix / lut 等元素串成链的
   **容器**。本库已实现其全部 constituent 元素的解码与求值（`curv`、`para`、矩阵、
   `mft1`/`mft2`、`mAB`/`mBA`），但不提供任意元素链容器。
@@ -641,6 +682,10 @@ sRGB 的**原生白点是 D65**，而 ICC 的 PCS 固定为 **D50**。
   （`cmsGDBCheckPoint` 对全部查询返回 out），改用独立第二实现
   （lcms2 取 Lab + Python 重写球面直方图）交叉验证，一致率 91.7%；
   **没有与 CMM 内部算法逐位对拍的 oracle**。
+
+- **命名色（`nmcl` 类）**：`ncl2` 全字段解析与查表已交付，第三方对拍用 lcms2
+  `cmsNamedColorInfo`（PCS u16 与设备坐标逐条相同）；但夹具是**合成**样本
+  （`testdata/named_lab.icc` / `named_xyz.icc`），本机**没有真实世界的 `nmcl` 类 profile**。
 
 PCS 为其他取值（既非 `Lab ` 也非 `XYZ `）时显式报错，不静默给出错误颜色。
 

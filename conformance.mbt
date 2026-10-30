@@ -121,7 +121,7 @@ fn class_support(device_class : String) -> (String, String) {
       )
     "nmcl" =>
       (
-        "不作为目标", "命名色（ncl2）是「色名→PCS」查表，属色彩资产管理，不改变数值变换行为",
+        "本次实现", "命名色：`ncl2` 全字段解析 + 色名→PCS 查表（`Profile::named_colors()`）",
       )
     _ => ("不作为目标", "未知设备类")
   }
@@ -173,7 +173,9 @@ pub fn Profile::conformance(self : Profile) -> ConformanceReport {
     version,
     required,
     missing,
-    transform_supported: level == "本次实现",
+    // `nmcl` 本次已实现，但它提供的是「色名 → PCS」查表，不是设备↔PCS 数值变换，
+    // 因此不把 `transform_supported` 置真（该字段的语义见 `ConformanceReport` 注释）。
+    transform_supported: level == "本次实现" && device_class != "nmcl",
     note,
     lut_count: luts.length(),
     support_level: level,

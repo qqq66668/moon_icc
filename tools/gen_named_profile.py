@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""生成 `nmcl`（命名色）类的合成 ICC profile。
+
+用途：给 `ncl2`（namedColor2Type）解析器建立判据，并作为对外示例的输入。
+
+产出（写入 testdata/）：
+  named_lab.icc   PCS = 'Lab '
+  named_xyz.icc   PCS = 'XYZ '
+
+两份 profile 的色名与设备坐标完全相同，只有 `ncl2` 里 PCS 三分量的编码空间不同：
+Lab 版按 v4 Lab 编码；XYZ 版由本脚本按 D50 从同一组 Lab 反算 XYZ 后按
+u1Fixed15Number 编码。于是有两条硬判据：
+
+  1. 同一色名在两份 profile 解出的 Lab 必须一致（差异只来自 u16 量化）；
+  2. 完整色名必须等于 prefix + 根名 + suffix。
+
+**PCS 坐标是 3 × uInt16Number，不是 s15Fixed16Number**（ICC.1:2010-12 §10.14）。
+第一版按 s15Fixed16 写过一次，lcms2 读第一条正常、从第二条起全部错位；
+已用 `_research/lcms_probe/named_oracle.py` 实测纠正。条目步长因此是
+`38 + 2*nDeviceCoords` 字节，而不是 `44 + 2*nDeviceCoords`。
+
+本脚本确定性：不写时间戳、不用随机数，重复运行输出逐字节相同。
+
+用法：python tools/gen_named_profile.py
+"""
+
+import os
+import struct
+import sys
+
+sys.stdout.reconfigure(encoding="utf-8")
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+TESTDATA = os.path.join(ROOT, "testdata")
+
+VERSION = 0x04300000  # 4.3
+PREFIX = "PANTONE "
+SUFFIX = " C"
+N_DEVICE_COORDS = 3  # 设备空间 RGB
+VENDOR_FLAG = 0x00000000
+
+# 命名色表：(根名, Lab, 设备坐标)
+# 最后一条与第一条同根名、Lab 不同，用于验证「首匹配」语义。
+COLORS = [
+    ("Red", (54.0, 80.8, 69.9), (255, 0, 0)),
+    ("Green", (87.7, -79.3, 81.0), (0, 255, 0)),
+    ("Blue", (29.6, 68.3, -112.0), (0, 0, 255)),
+    ("Gray", (50.0, 0.0, 0.0), (128, 128, 128)),
+    ("Red", (40.0, 60.0, 50.0), (200, 10, 10)),
+]
+
+EPS = 216.0 / 24389.0
+KAPPA = 24389.0 / 27.0
+D50 = (0.9642, 1.0, 0.8249)
+
+
+def sf16(x):
+    return struct.pack(">i", int(round(x * 65536.0)))
+
+
+def mluc(text):
+    """v4 的 `mluc` 类型（UTF-16BE，单条记录）。"""
+    raw = text.encode("utf-16-be")
+    rec = struct.pack(">HHII", 0x656E, 0x5553, len(raw), 28)
+    payload = b"mluc" + b"\0\0\0\0" + struct.pack(">II", 1, 12) + rec + raw
+    payload += b"\0" * ((4 - len(payload) % 4) % 4)
+    return payload
+
+
+def xyz_tag(x, y, z):
+    return b"XYZ " + b"\0\0\0\0" + sf16(x) + sf16(y) + sf16(z)
+
+
+def lab_to_xyz(l, a, b):
+    """ICC 的 Lab → XYZ（D50），常数取 ICC.1 附录里的 epsilon / kappa。"""
+    fy = (l + 16.0) / 116.0
+    fx = fy + a / 500.0
+    fz = fy - b / 200.0
+
+    def finv(t):
+        t3 = t * t * t
+        return t3 if t3 > EPS else (116.0 * t - 16.0) / KAPPA
+
+    return (D50[0] * finv(fx), D50[1] * finv(fy), D50[2] * finv(fz))
+
+
+def fixed_name(name):
+    raw = name.encode("ascii")
+    if len(raw) > 32:
+        raise SystemExit(f"名字超过 32 字节: {name!r}")
+    return raw.ljust(32, b"\0")
+
+
+def pcs_u16(lab, pcs_space):
+    """一条 Lab → tag 里的 3 × uInt16Number（v4 编码）。"""
+    if pcs_space == b"Lab ":
+        l, a, b = lab
+        return (
+            max(0, min(0xFFFF, int(round(l / 100.0 * 65535.0)))),
+            max(0, min(0xFFFF, int(round((a + 128.0) / 255.0 * 65535.0)))),
+            max(0, min(0xFFFF, int(round((b + 128.0) / 255.0 * 65535.0)))),
+        )
+    return tuple(
+        max(0, min(0xFFFF, int(round(v * 32768.0)))) for v in lab_to_xyz(*lab)
+    )
+
+
+def ncl2_tag(colors, pcs_space):
+    body = bytearray()
+    body += b"ncl2" + b"\0\0\0\0"
+    body += struct.pack(">III", VENDOR_FLAG, len(colors), N_DEVICE_COORDS)
+    body += fixed_name(PREFIX)
+    body += fixed_name(SUFFIX)
+    for root, lab, coords in colors:
+        body += fixed_name(root)
+        body += struct.pack(">3H", *pcs_u16(lab, pcs_space))
+        for c in coords[:N_DEVICE_COORDS]:
+            body += struct.pack(">H", c)
+    return bytes(body)
+
+
+def assemble(cls, space, pcs, tags):
+    """按 ICC 头部 + tag 表 + 4 字节对齐的 tag 数据组装 profile。"""
+    n = len(tags)
+    data_start = 128 + 4 + 12 * n
+    data_start += (-data_start) % 4
+    table = b""
+    blob = b""
+    for sig, payload in tags:
+        off = data_start + len(blob)
+        table += sig + struct.pack(">II", off, len(payload))
+        blob += payload
+        blob += b"\0" * ((-len(blob)) % 4)
+    total = data_start + len(blob)
+
+    hdr = bytearray(128)
+    struct.pack_into(">I", hdr, 0, total)
+    struct.pack_into(">I", hdr, 4, 0)  # preferred CMM
+    struct.pack_into(">I", hdr, 8, VERSION)
+    hdr[12:16] = cls
+    hdr[16:20] = space
+    hdr[20:24] = pcs
+    struct.pack_into(">6H", hdr, 24, 2026, 10, 30, 12, 0, 0)
+    hdr[36:40] = b"acsp"
+    struct.pack_into(">I", hdr, 40, 0)  # platform
+    struct.pack_into(">I", hdr, 44, 0)  # flags
+    struct.pack_into(">I", hdr, 48, 0)  # manufacturer
+    struct.pack_into(">I", hdr, 52, 0)  # model
+    struct.pack_into(">Q", hdr, 56, 0)  # attributes
+    struct.pack_into(">I", hdr, 64, 0)  # rendering intent
+    struct.pack_into(">3i", hdr, 68, 0x0000F6D6, 0x00010000, 0x0000D32D)  # D50
+    struct.pack_into(">I", hdr, 80, 0)  # creator
+    # 84..100 profile ID、100..128 保留区保持全 0
+
+    out = bytes(hdr) + struct.pack(">I", n) + table
+    out += b"\0" * (data_start - len(out))
+    out += blob
+    assert len(out) == total, (len(out), total)
+    return out
+
+
+def build(pcs_space):
+    tags = [
+        (b"desc", mluc("moon_icc synthetic named color profile (test fixture)")),
+        (b"cprt", mluc("No copyright. Generated by tools/gen_named_profile.py")),
+        (b"wtpt", xyz_tag(*D50)),
+        (b"ncl2", ncl2_tag(COLORS, pcs_space)),
+    ]
+    return assemble(b"nmcl", b"RGB ", pcs_space, tags)
+
+
+def parse_ncl2(blob):
+    """独立第二实现：按 ICC.1:2010-12 §10.14 从字节流反解 ncl2。"""
+    assert blob[0:4] == b"ncl2", blob[0:4]
+    vendor, count, n_coords = struct.unpack(">III", blob[8:20])
+    prefix = blob[20:52].split(b"\0")[0].decode("ascii")
+    suffix = blob[52:84].split(b"\0")[0].decode("ascii")
+    at = 84
+    rows = []
+    for _ in range(count):
+        root = blob[at : at + 32].split(b"\0")[0].decode("ascii")
+        at += 32
+        pcs = list(struct.unpack(">3H", blob[at : at + 6]))
+        at += 6
+        coords = list(
+            struct.unpack(">" + "H" * n_coords, blob[at : at + 2 * n_coords])
+        )
+        at += 2 * n_coords
+        rows.append((root, pcs, coords))
+    assert at == len(blob), (at, len(blob))
+    return vendor, prefix, suffix, n_coords, rows
+
+
+def decode_pcs(pcs, pcs_space):
+    if pcs_space == b"Lab ":
+        return (
+            pcs[0] / 65535.0 * 100.0,
+            pcs[1] / 65535.0 * 255.0 - 128.0,
+            pcs[2] / 65535.0 * 255.0 - 128.0,
+        )
+    return tuple(v / 32768.0 for v in pcs)
+
+
+def main():
+    for pcs_space, filename in (
+        (b"Lab ", "named_lab.icc"),
+        (b"XYZ ", "named_xyz.icc"),
+    ):
+        data = build(pcs_space)
+        path = os.path.join(TESTDATA, filename)
+        with open(path, "wb") as f:
+            f.write(data)
+        # 回读时按 tag 表定位 ncl2，不假设它排在某个固定位置：
+        # desc/cprt 是 mluc，载荷长度随文本变化，写死偏移必然错位。
+        count = struct.unpack(">I", data[128:132])[0]
+        blob = None
+        for i in range(count):
+            base = 132 + 12 * i
+            sig = data[base : base + 4]
+            off, size = struct.unpack(">II", data[base + 4 : base + 12])
+            if sig == b"ncl2":
+                blob = data[off : off + size]
+        if blob is None:
+            raise SystemExit(f"{filename}: 生成的 profile 里找不到 ncl2 tag")
+        vendor, prefix, suffix, n_coords, rows = parse_ncl2(blob)
+        expect = 84 + len(rows) * (38 + 2 * n_coords)
+        print(
+            f"{filename}: {len(data)} 字节, PCS={pcs_space.decode()!r}, "
+            f"tag_size={len(blob)}（预期 {expect}）, prefix={prefix!r}, "
+            f"suffix={suffix!r}, nDeviceCoords={n_coords}"
+        )
+        for root, pcs, coords in rows:
+            dec = decode_pcs(pcs, pcs_space)
+            print(
+                f"  {prefix + root + suffix!r} u16={pcs} "
+                f"pcs=({dec[0]:.4f}, {dec[1]:.4f}, {dec[2]:.4f}) device={coords}"
+            )
+
+
+if __name__ == "__main__":
+    main()

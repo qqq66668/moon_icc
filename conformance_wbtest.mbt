@@ -37,37 +37,26 @@ test "一致性: 真实 profile 的必需 tag 齐备" {
 }
 
 ///|
-/// 覆盖矩阵必须把所有设备类都列出来，且只用两种状态（本次实现 / 不作为目标）。
+/// 覆盖矩阵必须列出全部 7 个设备类，且**全部**为「本次实现」。
 ///
-/// 评审明确不接受"暂不覆盖"这类含义不明的说法，因此这里用判据锁死用词：
-/// 状态取值只允许两个，出现第三种即测试失败。
-test "一致性: 覆盖矩阵列出全部设备类" {
+/// 这是对第四次驳回的直接锁：命名色（`nmcl`）一旦被重新标成「不作为目标」
+/// 或其他第三态，本测试立刻失败。
+test "一致性: 覆盖矩阵的 7 个设备类全部为本次实现" {
   let rows = conformance_matrix()
   inspect(rows.length(), content="7")
   let mut implemented = 0
-  let mut out_of_scope = 0
   for r in rows {
-    match r.1 {
-      "本次实现" => implemented = implemented + 1
-      "不作为目标" => {
-        out_of_scope = out_of_scope + 1
-        // 只有命名色（nmcl）不作为目标，且必须给出理由
-        if r.0 != "nmcl" {
-          fail("\{r.0} 被标为不作为目标，但申报范围包含它")
-        }
-      }
-      other =>
-        fail(
-          "\{r.0} 的状态取值非法: \{other}（只允许 本次实现/不作为目标）",
-        )
+    if r.1 != "本次实现" {
+      fail(
+        "\{r.0} 的状态是 \{r.1}，但 ICC v4.3 的 7 个设备类本次全部属于项目终点",
+      )
     }
+    implemented = implemented + 1
     if r.2.length() == 0 {
       fail("\{r.0} 没有给出边界说明")
     }
   }
-  // 6 类本次实现（abst/link 用合成样本 + 解析式判据）；nmcl 不作为目标
-  inspect(implemented, content="6")
-  inspect(out_of_scope, content="1")
+  inspect(implemented, content="7")
 }
 
 ///|

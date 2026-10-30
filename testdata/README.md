@@ -11,6 +11,8 @@
 | `cmyk_printer.icc` | 同上目录的打印机 profile（v2.0，CMYK，PCS 为 Lab） | `desc`＝"Agfa : Swop Standard"；`cprt`＝**"Copyright (c) 2000 Microsoft Corporation"** |
 | `test4.icc` | [Little-CMS](https://github.com/mm2/Little-CMS) 仓库 `testbed/test4.icc` | Little-CMS 以 **MIT 许可**发布（声明全文见本文件末尾）；profile 自带 `desc`＝"Test profile, not suitable for real use" |
 | `xyz_lut.icc` | 本仓库合成，生成脚本 `tools/gen_xyz_lut_profile.py` | 本仓库自有产物，**无第三方版权** |
+| `named_lab.icc` | 本仓库合成，生成脚本 `tools/gen_named_profile.py` | 本仓库自有产物，**无第三方版权**（`nmcl` 类，PCS 为 `Lab `） |
+| `named_xyz.icc` | 同上 | 同上（PCS 为 `XYZ `，与 `named_lab.icc` 同一组色名与设备坐标） |
 
 > **关于前两个带第三方版权的文件（`srgb.icc` / `cmyk_printer.icc`）**：
 > 它们随 Windows 驱动/ICC 生态分发，此处仅作为**测试输入**（读取，不修改、不再分发派生作品），

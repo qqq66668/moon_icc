@@ -217,6 +217,120 @@ fn report_gamut(
 }
 
 ///|
+
+///|
+/// 保留 4 位小数的定点格式（CLI 输出契约，供文档示例逐字引用）。
+///
+/// 全精度 Double 打印成 `54.00015259021897` 这种形态，无法写进 README 示例；
+/// 这里用整数运算做四舍五入与补零，不依赖格式化库。
+fn fmt4(x : Double) -> String {
+  let scaled = x * 10000.0
+  let truncated = scaled.to_int()
+  let rounded = if scaled >= 0.0 {
+    if scaled - truncated.to_double() >= 0.5 {
+      truncated + 1
+    } else {
+      truncated
+    }
+  } else if truncated.to_double() - scaled >= 0.5 {
+    truncated - 1
+  } else {
+    truncated
+  }
+  let neg = rounded < 0
+  let mag = if neg { -rounded } else { rounded }
+  let int_part = mag / 10000
+  let frac = mag % 10000
+  let pad = if frac < 10 {
+    "000"
+  } else if frac < 100 {
+    "00"
+  } else if frac < 1000 {
+    "0"
+  } else {
+    ""
+  }
+  (if neg { "-" } else { "" }) +
+  int_part.to_string() +
+  "." +
+  pad +
+  frac.to_string()
+}
+
+///|
+/// 把一条命名色的 PCS 统一成 Lab（L 0..100、a/b -128..127）。
+///
+/// **必须用该条自己的 `pcs()`，不能回查 `lookup_lab(full_name)`**：查表是首匹配
+/// 语义，同根名的第 5 条会被显示成第 1 条的值（本项目真实踩到过）。
+fn named_entry_lab(
+  table : @moon_icc.NamedColor2,
+  e : @moon_icc.NamedColorEntry,
+) -> (Double, Double, Double) {
+  let pcs = e.pcs()
+  if table.pcs_space() == "Lab " {
+    (pcs.x, pcs.y, pcs.z)
+  } else if table.pcs_space() == "XYZ " {
+    let lab = @moon_icc.xyz_to_lab(pcs)
+    (lab.l, lab.a, lab.b)
+  } else {
+    (pcs.x, pcs.y, pcs.z)
+  }
+}
+
+///|
+/// 命名色：打印 `ncl2` 的字段与「色名 → PCS」查表结果。
+///
+/// 输出契约固定（供脚本与文档示例消费）：先若干行 `字段 值`，再每行
+/// `named <序号> <完整色名> lab=<L> <a> <b> device=<坐标...>`，
+/// 最后两行演示「完整色名命中、裸根名不命中」。
+fn describe_named(path : String) -> Unit raise {
+  let profile = @moon_icc.Profile::parse(@fs.read_file_to_bytes(path))
+  let table = profile.named_colors()
+  println("class \{profile.header.device_class}")
+  println("pcs \{table.pcs_space()}")
+  println("version \{table.major_version()}")
+  println("vendor_flag \{table.vendor_flag()}")
+  println("n_device_coords \{table.device_coords_count()}")
+  println("prefix \{table.prefix()}")
+  println("suffix \{table.suffix()}")
+  println("count \{table.length()}")
+  for i = 0; i < table.length(); i = i + 1 {
+    match table.entry_at(i) {
+      None => ()
+      Some(e) => {
+        let coords = e.device_coords()
+        let buf = StringBuilder()
+        for k = 0; k < coords.length(); k = k + 1 {
+          if k > 0 {
+            buf.write(" ")
+          }
+          buf.write("\{coords[k]}")
+        }
+        let lab = named_entry_lab(table, e)
+        println(
+          "named \{i} \{e.full_name()} lab=\{fmt4(lab.0)} \{fmt4(lab.1)} \{fmt4(lab.2)} device=\{buf.to_string()}",
+        )
+      }
+    }
+  }
+  // 查表语义演示：完整色名（prefix+根名+suffix）命中，裸根名不命中。
+  let first = match table.entry_at(0) {
+    Some(e) => e
+    None => return
+  }
+  let hit = match table.lookup_lab(first.full_name()) {
+    Some(v) => "\{fmt4(v.0)} \{fmt4(v.1)} \{fmt4(v.2)}"
+    None => "未命中"
+  }
+  println("lookup \{first.full_name()} -> \{hit}")
+  let bare = match table.lookup_lab(first.root_name()) {
+    Some(_) => "命中（不应发生）"
+    None => "未命中"
+  }
+  println("lookup \{first.root_name()} -> \{bare}")
+}
+
+///|
 /// 一致性检查：打印目标规范版本、覆盖矩阵，并（给了路径时）检查一个 profile。
 ///
 /// 这是把「标准版本与必需行为的覆盖目标」落成**可执行**的形式：
@@ -363,6 +477,7 @@ fn main {
     a == "lut" ||
     a == "proof" ||
     a == "gamut" ||
+    a == "named" ||
     a == "conformance"
   })
   match command_index {
@@ -374,6 +489,7 @@ fn main {
         "  moon run cmd/main -- link <源 profile> <目标 profile> [意图]",
       )
       println("  moon run cmd/main -- lut <LUT 型 profile 路径>")
+      println("  moon run cmd/main -- named <nmcl 命名色 profile 路径>")
       println("  moon run cmd/main -- conformance [profile 路径]")
       println(
         "  moon run cmd/main -- proof <源> <打样> <显示> [意图] [打样意图]",
@@ -455,6 +571,10 @@ fn main {
             e => println("打样失败: \{e}")
           }
         }
+        "named" =>
+          describe_named(args[i + 1]) catch {
+            e => println("命名色读取失败: \{e}")
+          }
         "conformance" => {
           let path = if i + 1 < args.length() {
             Some(args[i + 1])
