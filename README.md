@@ -246,6 +246,8 @@ moon run cmd/main --target wasm-gc -- proof testdata/srgb.icc testdata/cmyk_prin
 moon run cmd/main --target wasm-gc -- gamut testdata/srgb.icc testdata/cmyk_printer.icc
 moon run cmd/main --target wasm-gc -- lut testdata/cmyk_printer.icc
 moon run cmd/main --target wasm-gc -- lut testdata/test4.icc
+moon run cmd/main --target wasm-gc -- named testdata/named_lab.icc
+moon run cmd/main --target wasm-gc -- conformance
 ```
 
 `parse` 输出 profile 的头部与 tag 表：
@@ -279,7 +281,7 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | 功能 | 状态 |
 |---|---|
 | ICC profile 二进制解析（头部 + tag 表，含边界校验） | ✅ 已完成并验证 |
-| tag 数据解析（`XYZ ` / `curv` / `para`） | ✅ 已完成并验证 |
+| tag 数据解析（`XYZ ` / `curv` / `para` / `ncl2`） | ✅ 已完成并验证 |
 | matrix/TRC 类型 profile → PCS XYZ 变换 | ✅ 已完成并验证 |
 | XYZ ↔ Lab 转换与 CIE76 色差 | ✅ 已完成并验证 |
 | 逆变换（PCS XYZ → 设备 RGB）与矩阵求逆 | ✅ 已完成并验证 |
@@ -293,6 +295,8 @@ sample 1 0.9642791748046875 0.999969482421875 0.8250885009765625 ...
 | PCS 为 `XYZ ` 的 LUT 型 profile | ✅ 已完成并验证（v4 样本；v2 路径无样本，见「不作为目标」的诚实清单） |
 | 软打样链（源 → 打样设备往返 → 显示器） | ✅ 已完成并验证（对 lcms2 proofing 最大偏差 1 级） |
 | 色域判断（几何色域边界：球面直方图） | ✅ 已完成并验证（设备值样本 0 误判；被证伪的往返 ΔE 法在同类样本上误判 53.7%） |
+| `abst` / `link`（抽象 profile 与设备链接） | ✅ 已完成并验证（合成样本 + 解析式判据） |
+| 命名色（`nmcl` 类 / `ncl2` tag：色名 → PCS 查表） | ✅ 已完成并验证（对 lcms2 逐条 u16 对拍 5/5） |
 
 ## CLUT 型 profile 变换
 
@@ -767,9 +771,9 @@ ICC 规范（ISO 15076-1 / ICC.1）全程使用**大端序**，且大量使用 1
 ## 测试与验证
 
 ```
-moon test --target wasm-gc     # 93 项测试
+moon test --target wasm-gc     # 104 项测试
 moon test --target js          # 同一套测试，js 后端
-moon test --target native      # 同一套测试，native 后端
+moon test --target native      # 同一套测试，native 后端（本机 Windows 缺 MSVC，以 CI 为准）
 python tools/diff_oracle.py wasm-gc    # 外部 oracle 差分
 python tools/diff_oracle.py js         # 同上，js 后端
 python tools/verify_publish.py         # 在全新工程里实拉已发布包并跑真实变换
@@ -799,7 +803,7 @@ moon run cmd/main -- conformance       # 打印设备类覆盖矩阵（标准版
 | 软打样链 | `proofing_wbtest.mbt`（自洽性 + 物理正确性）+ `proof_golden_wbtest.mbt`（lcms2 `cmsCreateProofingTransform` 金标，最大偏差 1 级） |
 | 色域判断 | `proofing_wbtest.mbt`（设备值样本零误判、纸白与设备黑 in、PCS 黑与原色 out、覆盖率、映射误差独立性） |
 | 抽象 profile（`abst`）与 device link（`link`） | `abstract_link_wbtest.mbt`（恒等抽象不改变 PCS；device link 等于闭式 C=1-R, M=1-G, Y=1-B, K=0）|
-| 命令行示例与端到端可用性 | `cmd/main` 四子命令；`tools/verify_publish.py` 在仓库之外的空工程里 `moon add` 实拉并运行 |
+| 命令行示例与端到端可用性 | `cmd/main` 八子命令；`tools/verify_publish.py` 在仓库之外的空工程里 `moon add` 实拉并运行 |
 
 判据分四层，独立性递增：
 
