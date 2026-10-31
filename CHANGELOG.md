@@ -9,6 +9,21 @@
 该索引每行一个版本，含 `created_at`、`checksum`、`license`、`repository`、
 `preferred-target` 与依赖声明。下文的时间均取自该索引，不是估计值。
 
+## 0.3.2 — 2026-10-31
+
+**变更**
+
+- README 验收修正：测试数 93 → **104**；CLI 子命令数四 → **八**；命令行示例补
+  `named` 与 `conformance`；「当前进度」表补 `ncl2` 数据体、命名色、`abst`/`link`
+  三行；`moon test --target native` 补本机限制说明（Windows 缺 MSVC，以 CI 为准）。
+- `.gitignore` 补 `*.generated.mbti` 忽略规则。
+- 仓库 36 个提交；CI run `41181248676`（head `2d3ea31`）success。
+
+**验证**
+
+- `moon test --target wasm-gc` 与 `--target js` 各 **104/104**；
+  `moon fmt --check` / `moon check --target wasm-gc --deny-warn` / `moon build` 全 0 退出。
+
 ## 0.3.1 — 2026-10-30
 
 注册表 `created_at`：`2026-10-30T13:14:55Z`
